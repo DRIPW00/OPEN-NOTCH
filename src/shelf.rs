@@ -178,14 +178,10 @@ unsafe fn thumbnail(path: &str) -> Option<Vec<u8>> {
     let (w, h, mut px) = pixels?;
 
     // Any see-through pixels? Then it's an icon (keeps its shape); else a photo (fill).
-    let icon = px.chunks(4).any(|p| p[3] < 250);
+    // Some previews come without alpha at all (all 0): those are photos too.
+    let no_alpha = px.chunks(4).all(|p| p[3] == 0);
+    let icon = !no_alpha && px.chunks(4).any(|p| p[3] < 250);
     if !icon {
-        for p in px.chunks_mut(4) {
-            p[3] = 255;
-        }
-    }
-    // Some previews come without alpha at all (all 0): treat as opaque.
-    if px.chunks(4).all(|p| p[3] == 0) {
         for p in px.chunks_mut(4) {
             p[3] = 255;
         }

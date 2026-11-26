@@ -1,0 +1,39 @@
+# Changelog
+
+## R1.01
+
+### New
+- **Settings in tabs.** Settings (the gear on Home) is now split into General, Motion, Pages and About.
+- **Launch at startup** (General): starts with Windows. It shows the real state, including when you turned it off in Task Manager, and keeps working if you move the folder.
+- **Always show** (General): the notch stays full size over full-screen and maximised apps instead of shrinking to the thin bar.
+- **Animation speed** (Motion), seven speeds: Slow, Normal, Fast, Faster, Gotta go faster, Faster faster fasterrrr, Wally West.
+- **Hover delay** (Motion): type how long the pointer rests on the notch before it opens, from 0.15 to 1.5 seconds. The thin bar over full-screen apps uses it too.
+- **Open on** (Motion): Hover, Click or Both. With Click or Both, the thin bar can be clicked as well.
+- **Opens where you left off.** The notch opens on the page you were on last, even after a restart, or on Home if that page is gone.
+- **Pages loop.** Next from the last page slides forward onto Home, and Previous from Home slides back onto the last page. It no longer rewinds through every page.
+- **App icon.** The exe and the tray now have their own icon.
+
+### Changed
+- **Music sources stay put.** The app you pick on the Music page stays shown until it stops or closes, so another app starting to play no longer takes over. Two sessions from the same app are labelled apart, e.g. "Chrome" and "Chrome 2". Your keyboard's media keys still control the app Windows considers current, which may not be the one shown.
+- **Shuffle and Repeat** only appear for apps that support them, so there are no more buttons that do nothing. The workaround that pressed the app's own buttons is gone.
+- **The shadow is new:** thin, soft and close to the edge all the way round, including the curves at the top, with no bands or blocks.
+- **The thin bar** opens after your hover delay instead of a fixed 0.75 s.
+- **The hover delay** now defaults to 0.3 s; R1.00 opened instantly.
+
+### Fixed
+- Clicking a second app's tab on the Music page jumped to the Controls page.
+- Connecting or disconnecting a Bluetooth audio device could also connect or disconnect another device with a similar name ("JBL Flip" and "JBL Flip 5").
+- A 24-hour clock showed AM/PM on Home.
+- A page listed twice as hidden in settings.ini couldn't be turned back on.
+- Some photos on the file shelf showed as small icons instead of filling their tile.
+- Media buttons could control the wrong session when one app had two.
+- Wi-Fi could get stuck on "Joining…" if the adapter disappeared mid-join, and every Wi-Fi click was then ignored.
+- A failed Wi-Fi join could delete a network you had already saved, along with its password.
+- Song changes could show up to 4 seconds late after an app swapped one media session for another.
+- The first CPU reading after opening the System page was out of date.
+
+### Under the hood
+- No new dependencies. The exe is 0.77 MB, including the icon.
+- Removed unused code: debug-only printouts, about 110 lines of tray-icon drawing (it now uses the app icon), and 9 redundant Windows features in Cargo.toml.
+- 43 automatic tests (8 in R1.00). See TEST_LOG.md for every test and on-screen check.
+- Privacy: still no internet connections. The only new thing written outside the app's settings file is the Windows startup entry, and only while Launch at startup is on.

@@ -178,7 +178,15 @@ unsafe fn run(state: Arc<Mutex<State>>, commands: Receiver<Command>, notify: isi
                 update(&state);
             }
             Command::Join(network, password) => {
-                let Some(guid) = interface(handle) else { continue };
+                let Some(guid) = interface(handle) else {
+                    no_adapter(&state, &network.ssid);
+                    update(&state);
+                    continue;
+                };
+                // A profile already saved under this name (e.g. from before the router's security
+                // changed) is put back if joining fails, so its saved password isn't lost.
+                let name: Vec<u16> = network.ssid.encode_utf16().chain(Some(0)).collect();
+                let old = saved_profile(handle, &guid, &name);
                 let xml: Vec<u16> = profile_xml(&network, &password).encode_utf16().chain(Some(0)).collect();
                 let mut reason = 0;
                 if WlanSetProfile(handle, &guid, 0, PCWSTR(xml.as_ptr()), PCWSTR::null(), true, None, &mut reason) != 0 {
@@ -189,10 +197,16 @@ unsafe fn run(state: Arc<Mutex<State>>, commands: Receiver<Command>, notify: isi
                     update(&state);
                     continue;
                 }
-                let name: Vec<u16> = network.ssid.encode_utf16().chain(Some(0)).collect();
                 if !connect(handle, &guid, &name) || !wait_connected(&state, &network.ssid, &update, 15) {
-                    // Wrong password (or out of range): forget the profile we just made.
-                    let _ = WlanDeleteProfile(handle, &guid, PCWSTR(name.as_ptr()), None);
+                    // Wrong password (or out of range): undo the profile we just made.
+                    match old {
+                        Some(old) => {
+                            let _ = WlanSetProfile(handle, &guid, 0, PCWSTR(old.as_ptr()), PCWSTR::null(), true, None, &mut reason);
+                        }
+                        None => {
+                            let _ = WlanDeleteProfile(handle, &guid, PCWSTR(name.as_ptr()), None);
+                        }
+                    }
                     if let Ok(mut s) = state.lock() {
                         let message = if password.is_empty() { "Couldn't connect" } else { "Couldn't connect, check the password" };
                         s.error = Some((network.ssid.clone(), message.into()));
@@ -204,22 +218,43 @@ unsafe fn run(state: Arc<Mutex<State>>, commands: Receiver<Command>, notify: isi
                 update(&state);
             }
             Command::Connect(profile) => {
+                let ssid = state.lock().ok().and_then(|s| s.joining.clone()).unwrap_or_default();
                 if let Some(guid) = interface(handle) {
                     let wide: Vec<u16> = profile.encode_utf16().chain(Some(0)).collect();
-                    let ssid = state.lock().ok().and_then(|s| s.joining.clone()).unwrap_or_default();
                     if !connect(handle, &guid, &wide) || !wait_connected(&state, &ssid, &update, 10) {
                         if let Ok(mut s) = state.lock() {
                             s.error = Some((ssid, "Couldn't connect".into()));
                         }
                     }
-                    if let Ok(mut s) = state.lock() {
-                        s.joining = None;
-                    }
-                    update(&state);
+                } else {
+                    no_adapter(&state, &ssid);
                 }
+                if let Ok(mut s) = state.lock() {
+                    s.joining = None;
+                }
+                update(&state);
             }
         }
     }
+}
+
+/// The Wi-Fi adapter went away (disabled, unplugged) before a join could start.
+fn no_adapter(state: &Arc<Mutex<State>>, ssid: &str) {
+    if let Ok(mut s) = state.lock() {
+        s.joining = None;
+        s.error = Some((ssid.to_string(), "Wi-Fi adapter not found".into()));
+    }
+}
+
+/// The XML of a profile Windows has saved under `name` (NUL-terminated UTF-16), NUL-terminated.
+unsafe fn saved_profile(handle: HANDLE, guid: &GUID, name: &[u16]) -> Option<Vec<u16>> {
+    let mut xml = windows::core::PWSTR::null();
+    if WlanGetProfile(handle, guid, PCWSTR(name.as_ptr()), None, &mut xml, None, None) != 0 || xml.is_null() {
+        return None;
+    }
+    let copy = xml.as_wide().iter().copied().chain(Some(0)).collect();
+    WlanFreeMemory(xml.0 as *const _);
+    Some(copy)
 }
 
 /// Ask Windows to connect using a saved profile (`name` is NUL-terminated UTF-16).

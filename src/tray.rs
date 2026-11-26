@@ -3,12 +3,8 @@
 
 use std::cell::Cell;
 
-use windows::core::{w, Result};
+use windows::core::{w, Result, PCWSTR};
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Direct2D::Common::*;
-use windows::Win32::Graphics::Direct2D::*;
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -56,7 +52,7 @@ impl Tray {
         )?;
 
         TASKBAR_CREATED.with(|m| m.set(RegisterWindowMessageW(w!("TaskbarCreated"))));
-        ICON.with(|icon| icon.set(draw_icon().unwrap_or_else(|_| fallback_icon())));
+        ICON.with(|icon| icon.set(load_icon(instance)));
         add_icon(hwnd);
         Ok(Tray { hwnd })
     }
@@ -140,103 +136,12 @@ extern "system" fn tray_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: L
     }
 }
 
-/// Draw a tiny notch for the tray: a black pill with a white outline, so it's visible on
-/// both dark and light taskbars. Drawn at the size Windows wants for small icons.
-unsafe fn draw_icon() -> Result<HICON> {
+/// The app's icon (resource 1, see build.rs) at the size Windows wants for the tray; the
+/// small sizes in it are drawn for the tray. Windows' default app icon if it's missing.
+unsafe fn load_icon(instance: HINSTANCE) -> HICON {
     let size = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem()).max(16);
-
-    // A 32-bit bitmap with an alpha channel to draw into.
-    let info = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: size,
-            biHeight: -size,
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let dc = CreateCompatibleDC(None);
-    let mut bits = std::ptr::null_mut();
-    let color = CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0)?;
-    let previous = SelectObject(dc, color.into());
-
-    let result = (|| -> Result<()> {
-        let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-        let props = D2D1_RENDER_TARGET_PROPERTIES {
-            r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
-            dpiX: 96.0,
-            dpiY: 96.0,
-            ..Default::default()
-        };
-        let target = factory.CreateDCRenderTarget(&props)?;
-        target.BindDC(dc, &RECT { left: 0, top: 0, right: size, bottom: size })?;
-
-        let s = size as f32;
-        let (w, h) = (s * 0.92, s * 0.46);
-        let border = (s / 16.0).max(1.0);
-        let pill = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F {
-                left: (s - w) / 2.0,
-                top: (s - h) / 2.0,
-                right: (s + w) / 2.0,
-                bottom: (s + h) / 2.0,
-            },
-            radiusX: h / 2.0,
-            radiusY: h / 2.0,
-        };
-        let black = target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }, None)?;
-        let white = target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, None)?;
-
-        target.BeginDraw();
-        target.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
-        target.FillRoundedRectangle(&pill, &black);
-        let mut inner = pill;
-        inner.rect.left += border / 2.0;
-        inner.rect.top += border / 2.0;
-        inner.rect.right -= border / 2.0;
-        inner.rect.bottom -= border / 2.0;
-        inner.radiusX -= border / 2.0;
-        inner.radiusY -= border / 2.0;
-        target.DrawRoundedRectangle(&inner, &white, border, None);
-        target.EndDraw(None, None)
-    })();
-
-    SelectObject(dc, previous);
-    let _ = DeleteDC(dc);
-    if let Err(error) = result {
-        let _ = DeleteObject(color.into());
-        return Err(error);
+    match LoadImageW(Some(instance), PCWSTR(std::ptr::without_provenance(1)) /* MAKEINTRESOURCE(1) */, IMAGE_ICON, size, size, LR_DEFAULTCOLOR) {
+        Ok(handle) => HICON(handle.0),
+        Err(_) => LoadIconW(None, IDI_APPLICATION).unwrap_or_default(),
     }
-
-    // Direct2D wrote premultiplied colour; icons expect straight alpha. Convert so the
-    // anti-aliased edges aren't darkened.
-    let pixels = std::slice::from_raw_parts_mut(bits as *mut u8, (size * size * 4) as usize);
-    for px in pixels.chunks_exact_mut(4) {
-        let a = px[3] as u32;
-        if a > 0 && a < 255 {
-            for c in &mut px[..3] {
-                *c = ((*c as u32 * 255 + a / 2) / a).min(255) as u8;
-            }
-        }
-    }
-
-    // Icons also need a 1-bit mask; it's ignored when the colour bitmap has alpha.
-    let mask = CreateBitmap(size, size, 1, 1, None);
-    let icon_info = ICONINFO { fIcon: TRUE, xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };
-    let icon = CreateIconIndirect(&icon_info);
-    let _ = DeleteObject(mask.into());
-    let _ = DeleteObject(color.into());
-    icon
-}
-
-/// Windows' generic app icon, in case drawing our own ever fails.
-unsafe fn fallback_icon() -> HICON {
-    LoadIconW(None, IDI_APPLICATION).unwrap_or_default()
 }

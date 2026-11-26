@@ -83,6 +83,7 @@ unsafe fn run(stats: Arc<Mutex<Stats>>, wanted: Arc<AtomicBool>, wakeup: Receive
             if wakeup.recv().is_err() {
                 return;
             }
+            last_cpu = None; // the old baseline would average over the whole sleep
             continue;
         }
 

@@ -16,13 +16,15 @@ To quit, click the notch icon in the tray (by the clock) → **Quit Dynamic Isla
 
 ## What it does
 
-Hover the notch to open it; move away and it closes after a short pause. Scroll on the open
-notch, or click its left/right edges, to switch pages. It always opens on Home.
+Hover the notch to open it (or click it; see Settings); move away and it closes after a short
+pause. Scroll on the open notch, or click its left/right edges, to switch pages: they go round
+in a loop. It opens on the page you were on last.
 
 - **Home**: time, date and a battery ring. A green dot while an app uses the camera, an orange
   dot for the microphone; hover the dots to see which apps.
 - **Music**: album art, a live equalizer and full controls for whatever is playing (Apple Music,
-  Spotify, browsers…). Other apps playing at the same time appear as tabs.
+  Spotify, browsers…). Shuffle and repeat show for apps that support them. Other apps playing
+  at the same time appear as tabs; the one you pick stays until it stops.
 - **File shelf**: drag files onto the notch to keep them; drag them back out onto any folder or
   app (always as a copy, the original stays put).
 - **Controls**: volume and brightness sliders, the audio output and input devices, and mute.
@@ -30,16 +32,23 @@ notch, or click its left/right edges, to switch pages. It always opens on Home.
 - **Network**: Wi-Fi and Bluetooth switches; pick a Wi-Fi network (type a new network's password
   right in the notch) or connect headphones and speakers.
 - **System**: CPU, RAM, GPU and SSD usage.
-- **Settings** (gear on Home): turn pages on or off and drag them into your own order.
+- **Settings** (gear on Home):
+  - General: launch at startup, Always show (stay full size over full-screen and maximised
+    apps).
+  - Motion: animation speed (Slow to Wally West), the hover delay (how long the pointer rests
+    on the notch before it opens: type 0.15 to 1.5 seconds), and Open on: Hover, Click or Both.
+  - Pages: turn pages on or off and drag them into your own order.
 - **Pin** (top-right of the open notch): keeps it open.
-- **Full-screen and maximised apps**: the notch shrinks to a thin bar that clicks pass through;
-  rest the pointer on it for a moment to open it.
+- **Full-screen and maximised apps**: the notch shrinks to a thin bar (unless Always show is on).
+  Rest the pointer on it for the hover delay, or click it if Open on is Click or Both. With
+  Open on: Hover, clicks pass through it to the app.
 
 ## Privacy
 
 - Everything stays on your PC. The app makes no internet connections and collects nothing.
-- The only file it writes is `%APPDATA%\DynamicIsland\settings.ini` (which pages show, and
-  their order).
+- The only file it writes is `%APPDATA%\DynamicIsland\settings.ini` (your settings and the
+  last page you were on). "Launch at startup" adds one entry to Windows' startup apps
+  (`HKCU\...\CurrentVersion\Run`), removed when you turn it off.
 - Wi-Fi passwords you type are handed to Windows (which stores them like the Wi-Fi menu does)
   and are not kept by the app.
 
@@ -47,30 +56,32 @@ notch, or click its left/right edges, to switch pages. It always opens on Home.
 
 Needs [Rust](https://rustup.rs) (and the Visual Studio C++ build tools that its installer offers).
 
-Double-click **`build.bat`**. It builds an optimised exe into `release\Dynamic Island.exe`,
-closes any running copy and starts the new one. Or from a terminal:
+From a terminal in this folder:
 
 ```powershell
-cargo run            # debug build: a console shows refresh rate and fps per animation
-cargo run --release  # optimised build, no console
+cargo build --release   # builds target\release\dynamic-island.exe
+cargo run --release     # builds it and starts it
 ```
 
 ## Project layout
 
 ```
 release/Dynamic Island.exe   the ready-to-run app
-build.bat                    builds release/Dynamic Island.exe
+CHANGELOG.md                 what's new in each version
+TEST_LOG.md                  every test and on-screen check for R1.01
 Cargo.toml, Cargo.lock       Rust project and exact dependency versions
+build.rs                     puts assets/icon.ico into the exe (no extra tools)
+assets/icon.ico              the app and tray icon
 src/
   main.rs        the notch window, pages, drawing and mouse/keyboard handling
   spring.rs      animation curves (springs and eased slides)
   gfx.rs         drawing helpers: icons, text, images, rings
-  tray.rs        the tray icon and its Quit menu
-  settings.rs    which pages show and their order (saved to settings.ini)
+  tray.rs        the tray icon and its menu (Hide notch, Quit)
+  settings.rs    your settings and last page (saved to settings.ini)
+  startup.rs     "Launch at startup" (Windows' startup apps)
   sysinfo.rs     clock, date and battery
   privacy.rs     which apps use the camera / microphone
   media.rs       every app's now-playing info and controls (Windows media controls)
-  uia.rs         presses an app's own shuffle/repeat buttons when it doesn't support them otherwise
   audio.rs       volume, mute, audio devices
   brightness.rs  built-in display brightness
   wifi.rs        Wi-Fi networks: scan, join, passwords

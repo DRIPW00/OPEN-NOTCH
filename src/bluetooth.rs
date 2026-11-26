@@ -4,8 +4,7 @@
 //! - Connects / disconnects Bluetooth audio devices (headphones, earbuds, speakers): their
 //!   Windows audio driver accepts a "reconnect" / "disconnect" request. This is the same
 //!   trick audio-switcher tools use, since Windows has no public "connect this device" call.
-//! - Other devices (mice, keyboards, phones) connect on their own; clicking one opens
-//!   Windows' Bluetooth settings.
+//! - Other devices (mice, keyboards, phones) connect on their own; clicking one does nothing.
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -213,10 +212,11 @@ unsafe fn set_connected(name: &str, connect: bool) -> bool {
     done
 }
 
-/// "AirPods Pro" matches drivers named "AirPods Pro", "AirPods Pro Stereo", "AirPods Pro Hands-Free".
+/// "AirPods Pro" matches drivers named "AirPods Pro", "AirPods Pro Stereo", "AirPods Pro Hands-Free",
+/// but not "AirPods Pro 2 Stereo" (a different device).
 fn names_match(filter: &str, device: &str) -> bool {
     let (f, d) = (filter.to_lowercase(), device.to_lowercase());
-    f == d || f.starts_with(&d) || d.starts_with(&f)
+    f == d || f.strip_prefix(&d).and_then(|rest| rest.strip_prefix(' ')).is_some_and(|rest| rest.starts_with("stereo") || rest.starts_with("hands-free"))
 }
 
 #[cfg(test)]
@@ -226,5 +226,8 @@ mod tests {
         assert!(super::names_match("AirPods Pro Stereo", "AirPods Pro"));
         assert!(super::names_match("AirPods Pro", "AirPods Pro"));
         assert!(!super::names_match("Speakers", "AirPods Pro"));
+        assert!(super::names_match("AirPods Pro Hands-Free", "AirPods Pro"));
+        assert!(!super::names_match("JBL Flip 5 Stereo", "JBL Flip"));
+        assert!(!super::names_match("AirPods Pro Hands-Free", "AirPods"));
     }
 }

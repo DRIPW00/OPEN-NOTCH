@@ -25,7 +25,7 @@
 // - Settings (gear on Home): show/hide and reorder the pages; saved between runs.
 // - Quit from the tray icon by the clock. (Clicking the notch never closes it.)
 
-// Hide the console window in release builds (keep it in debug builds for log output).
+// No console window in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
@@ -37,11 +37,11 @@ mod privacy;
 mod radios;
 mod shelf;
 mod spring;
+mod startup;
 mod stats;
 mod settings;
 mod sysinfo;
 mod tray;
-mod uia;
 mod wifi;
 
 use std::cell::RefCell;
@@ -89,9 +89,15 @@ const SYSTEM_H: f32 = 128.0; // System page incl. the page dots
 const SHELF_H: f32 = 136.0; // Shelf page incl. the page dots
 /// Settings: header, one row per page, then About.
 const SETTINGS_ROW: f32 = 36.0;
-const SETTINGS_TOP: f32 = 48.0; // first row
+const SETTINGS_TOP: f32 = 92.0; // first page row (Pages tab)
+const SETTINGS_CONTENT: f32 = 76.0; // first row of the other tabs
+/// Settings is split into these tabs (a segmented control under the title).
+const SETTINGS_TABS: [&str; 4] = ["General", "Motion", "Pages", "About"];
+const TAB_GENERAL: usize = 0;
+const TAB_MOTION: usize = 1;
+const TAB_PAGES: usize = 2;
 /// Shown under About in Settings.
-const ABOUT_VERSION: &str = "R1.00";
+const ABOUT_VERSION: &str = "R1.01";
 const ABOUT_AUTHOR: &str = "DRIPWOO";
 /// The notch while files are dragged over it (the drop zone).
 const DROP: (f32, f32) = (CARD_W, 140.0);
@@ -144,11 +150,12 @@ const HUD_MS: u32 = 1600;
 /// When the pointer leaves the open notch, wait this long before closing (it may come back).
 const LEAVE_TIMER: usize = 7;
 const LEAVE_MS: u32 = 450;
+/// Hover delay (Settings > Motion): opens the card if the pointer is still there.
+const HOVER_TIMER: usize = 10;
 /// In bar mode (full-screen app) the bar lets clicks through, so we can't see the pointer
 /// arrive; instead we check where it is every 100 ms. Resting on the bar for 0.75 s opens it.
 const BAR_POLL_TIMER: usize = 8;
 const BAR_POLL_MS: u32 = 100;
-const DWELL: Duration = Duration::from_millis(750);
 /// Posted (by the window-event hooks) to re-check whether an app covers the screen.
 const WM_CHECK_COVER: u32 = WM_APP + 11;
 /// Blinks the caret in the Wi-Fi password field.
@@ -210,6 +217,15 @@ enum Action {
     /// The gear on Home (opens Settings) and Settings' Done button.
     OpenSettings,
     CloseSettings,
+    SettingsTab(usize),
+    Startup,
+    AlwaysShow,
+    /// Settings > Motion > Animation speed option.
+    Speed(usize),
+    /// Settings > Motion > Hover delay box (click to type in it).
+    DelayBox,
+    /// Settings > Motion > Open on: Hover / Click / Both.
+    OpenMode(usize),
     /// Settings: a page's show/hide switch, and its drag handle (press and drag to reorder).
     TabToggle(Page),
     TabGrip(usize),
@@ -262,9 +278,6 @@ struct App {
     /// Time of the previous frame; None means the next frame is the first of an animation.
     last_frame: Option<Instant>,
     animating: bool,
-    /// Frame counter for the fps report printed in debug builds.
-    frames: u32,
-    anim_start: Instant,
     hovered: bool,
     // Now Playing
     media: Media,
@@ -280,8 +293,6 @@ struct App {
     hover_action: Option<Action>,
     /// A short message shown in place of the artist, e.g. "Apple Music doesn't let…".
     notice: Option<String>,
-    /// The app Windows last reported as its current media app (to notice changes).
-    last_system: Option<String>,
     // Idle info
     clock: sysinfo::Clock,
     battery: Option<sysinfo::Battery>,
@@ -321,11 +332,15 @@ struct App {
     leaving: bool,
     /// Windows is watching for the pointer leaving (TrackMouseEvent is armed).
     tracking: bool,
+    /// The pointer arrived and the hover delay is running (HOVER_TIMER).
+    hover_pending: bool,
+    /// Typing in the hover delay box: what's typed so far (None = not editing).
+    delay_edit: Option<String>,
     /// Pinned open: doesn't close when the pointer leaves.
     pinned: bool,
     /// A full-screen or maximised app is in front: shrink to a thin bar.
     covered: bool,
-    /// When the pointer arrived on the bar (it opens after DWELL).
+    /// When the pointer arrived on the bar (it opens after the hover delay).
     dwell_since: Option<Instant>,
     /// The window lets clicks through (bar mode).
     click_through: bool,
@@ -367,6 +382,10 @@ struct App {
     prefs: settings::Prefs,
     /// The Settings view is showing (instead of the pages).
     in_settings: bool,
+    /// Which Settings tab is shown (SETTINGS_TABS).
+    settings_tab: usize,
+    /// "Launch at startup", as the registry says (read when Settings opens).
+    startup: bool,
     /// Reordering: the row being dragged (index into prefs.order).
     reorder: Option<usize>,
     /// Each Settings row's animated top (design pixels), so rows glide into new places.
@@ -377,6 +396,8 @@ struct App {
     shadow_hwnd: HWND,
     shadow_dc: HDC,
     shadow_bitmap: HBITMAP,
+    /// The shadow bitmap's pixels (BGRA, top-down rows), written by paint_shadow.
+    shadow_bits: *mut u32,
     /// Notch size the shadow was last drawn for (redrawn only when it changes).
     shadow_key: (i32, i32),
 }
@@ -494,6 +515,9 @@ fn main() -> Result<()> {
         if GetLastError() == ERROR_ALREADY_EXISTS {
             return Ok(());
         }
+
+        // "Launch at startup" keeps working if this folder was moved.
+        startup::refresh_path();
 
         // Crisp rendering on high-DPI screens, per monitor.
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -739,6 +763,152 @@ unsafe fn create_render_target(
     Ok((target, brush))
 }
 
+/// The notch's outline in pixels: a box hanging from the top edge, centred at `cx`,
+/// `w` wide and `h` tall, with round bottom corners of radius `r`. Its top corners flare
+/// out into the screen edge over `shoulder` pixels.
+struct Outline {
+    cx: f32,
+    w: f32,
+    h: f32,
+    r: f32,
+    shoulder: f32,
+}
+
+impl Outline {
+    /// Signed distance from (x, y) to the outline: > 0 outside, < 0 inside, so the shadow
+    /// hugs the shape the same distance all the way round: round bottom corners, and the
+    /// curve where each top corner flares out into the screen edge.
+    fn distance(&self, x: f32, y: f32) -> f32 {
+        let ax = (x - self.cx).abs(); // the shape is mirror-symmetric
+        let half = self.w / 2.0;
+        // The body: a box hanging from the top, round bottom corners.
+        let qx = ax - (half - self.r);
+        let qy = y - (self.h - self.r);
+        let body = length(qx.max(0.0), qy.max(0.0)) + qx.max(qy).min(0.0) - self.r;
+        if self.shoulder <= 0.0 {
+            return body;
+        }
+        // The flare: a concave quarter round of radius `shoulder`, centred at
+        // (half + shoulder, shoulder), from the side up to its tip at the screen edge.
+        let sh = self.shoulder;
+        let (px, py) = (ax - half - sh, y - sh);
+        if py > 0.0 {
+            body // below the flare: the straight side
+        } else if px <= 0.0 {
+            body.min(sh - length(px, py)) // facing the curve: straight out from its centre
+        } else {
+            body.min(length(px, py + sh)) // beyond it: the tip is nearest
+        }
+    }
+}
+
+fn length(x: f32, y: f32) -> f32 {
+    (x * x + y * y).sqrt()
+}
+
+/// How the shadow looks, in pixels: blur width, darkness at the edge, shift down.
+struct ShadowLook {
+    sigma: f32,
+    peak: f32,
+    drop: f32,
+}
+
+impl ShadowLook {
+    /// The shader: opacity at `d` pixels outside the edge. A Gaussian falloff: darkest at
+    /// the edge, smooth all the way out, and gone (under 1/255) by about 3 sigma.
+    fn alpha(&self, d: f32) -> f32 {
+        if d <= 0.0 {
+            return self.peak;
+        }
+        self.peak * (-0.5 * (d / self.sigma).powi(2)).exp()
+    }
+
+    /// How far from the edge the shadow can show.
+    fn reach(&self) -> f32 {
+        3.5 * self.sigma + self.drop
+    }
+}
+
+/// Paint the shadow into premultiplied BGRA pixels (black, so only alpha is set). Runs the
+/// shader for every pixel in the thin band around the outline; the notch window covers
+/// the rest. Each pixel gets a fixed random offset under one 8-bit step before rounding
+/// (dithering), so the fade has no visible bands.
+fn paint_shadow(pixels: &mut [u32], width: usize, height: usize, notch: &Outline, look: &ShadowLook) {
+    pixels.fill(0);
+    if look.peak <= 0.0 || notch.w <= 0.0 {
+        return;
+    }
+    const INSIDE: f32 = 2.0; // a little under the notch's anti-aliased rim, so no gap shows
+    let reach = look.reach();
+    let x0 = (notch.cx - notch.w / 2.0 - reach).floor().max(0.0) as usize;
+    let x1 = ((notch.cx + notch.w / 2.0 + reach).ceil() as usize).min(width);
+    let y1 = ((notch.h + reach).ceil() as usize).min(height);
+    // Columns well inside the notch, skipped on the rows above its bottom corners.
+    let skip0 = (notch.cx - notch.w / 2.0 + INSIDE).ceil().max(0.0) as usize;
+    let skip1 = (notch.cx + notch.w / 2.0 - INSIDE).floor().max(0.0) as usize;
+    for y in 0..y1 {
+        let fy = y as f32 + 0.5 - look.drop;
+        // Lit from above: nothing at the screen edge itself, fading in smoothly down the
+        // flared top corners.
+        let fade = (fy / (notch.shoulder + 2.0 * look.sigma)).clamp(0.0, 1.0);
+        let fade = fade * fade * (3.0 - 2.0 * fade);
+        let straight = fy < notch.h - notch.r;
+        let mut x = x0;
+        while x < x1 {
+            if straight && x >= skip0 && x < skip1 {
+                x = skip1;
+                continue;
+            }
+            let d = notch.distance(x as f32 + 0.5, fy);
+            if d > -INSIDE && fade > 0.0 {
+                let a = look.alpha(d) * fade * 255.0 + dither(x, y);
+                pixels[y * width + x] = (a.clamp(0.0, 255.0) as u32) << 24;
+            }
+            x += 1;
+        }
+    }
+}
+
+/// A fixed pseudo-random value in [0, 1) for each pixel (a hash, so it doesn't flicker).
+fn dither(x: usize, y: usize) -> f32 {
+    let mut n = (x as u32).wrapping_mul(0x9E37_79B1) ^ (y as u32).wrapping_mul(0x85EB_CA77);
+    n ^= n >> 15;
+    n = n.wrapping_mul(0x2C1B_3C6D);
+    n ^= n >> 12;
+    (n & 0xFFFF) as f32 / 65536.0
+}
+
+/// Where page `i` sits relative to the slide position `pos`, in pages, with the pages in a
+/// ring of `count`: the shortest way round, in (-count/2, count/2].
+fn ring_offset(i: usize, pos: f32, count: usize) -> f32 {
+    if count == 0 {
+        return 0.0;
+    }
+    let n = count as f32;
+    let d = (i as f32 - pos).rem_euclid(n);
+    if d > n / 2.0 { d - n } else { d }
+}
+
+/// Which media session the notch shows (and sends commands to). The one you picked stays
+/// until it stops or goes away: a new app starting to play, or Windows' "current" app
+/// changing, doesn't switch it (the source tabs show those). With none, it picks what's
+/// playing (Windows' current first), else what's paused.
+fn pick_source(selected: Option<&str>, sessions: &[(&str, Status)], system: Option<&str>) -> Option<String> {
+    let is = |id: &str, ok: &dyn Fn(Status) -> bool| sessions.iter().any(|(s, st)| *s == id && ok(*st));
+    let live = |st: Status| st != Status::Stopped;
+    let playing = |st: Status| st == Status::Playing;
+    if let Some(id) = selected.filter(|id| is(id, &live)) {
+        return Some(id.to_string());
+    }
+    let first = |ok: &dyn Fn(Status) -> bool| sessions.iter().find(|(_, st)| ok(*st)).map(|(id, _)| *id);
+    system
+        .filter(|id| is(id, &playing))
+        .or_else(|| first(&playing))
+        .or(system.filter(|id| is(id, &live)))
+        .or_else(|| first(&live))
+        .map(str::to_string)
+}
+
 fn format_time(secs: f64) -> String {
     let secs = secs.max(0.0) as u64;
     let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
@@ -778,8 +948,6 @@ impl App {
             height: Spring::new(CLOSED.1),
             last_frame: None,
             animating: false,
-            frames: 0,
-            anim_start: Instant::now(),
             hovered: false,
             media: Media::start(hwnd),
             sessions: Vec::new(),
@@ -790,7 +958,6 @@ impl App {
             hits: Vec::new(),
             hover_action: None,
             notice: None,
-            last_system: None,
             clock: sysinfo::clock(),
             battery: sysinfo::battery(),
             privacy: 0,
@@ -815,6 +982,8 @@ impl App {
             hud_mix: Spring::new(0.0),
             leaving: false,
             tracking: false,
+            hover_pending: false,
+            delay_edit: None,
             pinned: false,
             covered: false,
             dwell_since: None,
@@ -843,12 +1012,15 @@ impl App {
             caret_on: true,
             prefs: settings::Prefs::load(),
             in_settings: false,
+            settings_tab: TAB_GENERAL,
+            startup: false,
             reorder: None,
             row_y: Vec::new(),
             grab_offset: 0.0,
             shadow_hwnd: shadow,
             shadow_dc: CreateCompatibleDC(None),
             shadow_bitmap: HBITMAP::default(),
+            shadow_bits: std::ptr::null_mut(),
             shadow_key: (-1, -1),
         };
         app.resize_surface()?;
@@ -887,6 +1059,7 @@ impl App {
             let _ = DeleteObject(self.shadow_bitmap.into());
         }
         self.shadow_bitmap = shadow;
+        self.shadow_bits = bits.cast();
         self.shadow_key = (-1, -1);
         Ok(())
     }
@@ -923,12 +1096,6 @@ impl App {
         let monitor = MonitorFromWindow(self.hwnd, MONITOR_DEFAULTTOPRIMARY);
         self.refresh_hz = monitor_refresh_hz(monitor).unwrap_or(60.0);
         self.vblank_output = find_dxgi_output(monitor);
-        #[cfg(debug_assertions)]
-        println!(
-            "monitor: {:.0} Hz, vblank sync: {}",
-            self.refresh_hz,
-            if self.vblank_output.is_some() { "per-monitor" } else { "compositor (fallback)" }
-        );
     }
 
     // ---------------------------------------------------------------- Now Playing state
@@ -956,12 +1123,7 @@ impl App {
         tabs
     }
 
-    /// A new picture of what's playing arrived from media.rs.
-    ///
-    /// Which session the notch shows (and sends commands to): the media app used last.
-    /// - When Windows' "current" media app changes (you played/paused/skipped in an app, or
-    ///   used the media keys), show that one. Media keys control the same app.
-    /// - Clicking a tab picks that app until you use another one.
+    /// A new picture of what's playing arrived from media.rs. Which session it shows: see pick_source.
     unsafe fn apply_snapshot(&mut self, snapshot: MediaSnapshot) {
         let had_media = self.has_media();
         let page_before = self.page_kind();
@@ -971,35 +1133,8 @@ impl App {
         }
         self.sessions = snapshot.sessions;
 
-        let exists = |id: &str, sessions: &[Session]| sessions.iter().any(|s| s.id == id);
-        if self.selected.as_deref().is_some_and(|id| !exists(id, &self.sessions)) {
-            self.selected = None;
-        }
-        let system = snapshot.system_current.filter(|id| exists(id, &self.sessions));
-        let playing: Vec<String> = self
-            .sessions
-            .iter()
-            .filter(|s| s.status == Status::Playing)
-            .map(|s| s.id.clone())
-            .collect();
-        let preferred_playing = system
-            .clone()
-            .filter(|id| playing.contains(id))
-            .or_else(|| playing.first().cloned());
-
-        let system_changed = system.is_some() && system != self.last_system;
-        if system.is_some() {
-            self.last_system = system.clone();
-        }
-        if system_changed {
-            // You used another media app (or the media keys switched): follow it.
-            self.selected = system;
-        } else if self.selected.is_none() {
-            // Nothing chosen yet: what's playing, else what Windows considers current.
-            self.selected = preferred_playing.or(system).or_else(|| {
-                self.sessions.iter().find(|s| s.status != Status::Stopped).map(|s| s.id.clone())
-            });
-        }
+        let ids: Vec<(&str, Status)> = self.sessions.iter().map(|s| (s.id.as_str(), s.status)).collect();
+        self.selected = pick_source(self.selected.as_deref(), &ids, snapshot.system_current.as_deref());
 
         // Upload album art for the shown session; forget art no longer needed.
         let wanted = self.current().and_then(|s| s.art.clone());
@@ -1016,18 +1151,6 @@ impl App {
             }
         }
 
-        #[cfg(debug_assertions)]
-        for s in &self.sessions {
-            println!(
-                "media: [{}] {:?} {} - {} ({}) {}",
-                s.app_name,
-                s.status,
-                s.title,
-                s.artist,
-                format_time(s.duration),
-                if Some(&s.id) == self.selected.as_ref() { "<- shown" } else { "" }
-            );
-        }
 
         // The Music page comes and goes with media: stay on the same page if it still exists.
         match self.pages().iter().position(|p| *p == page_before) {
@@ -1067,7 +1190,7 @@ impl App {
     fn closed_size(&self) -> (f32, f32) {
         if self.hud.is_some() {
             HUD
-        } else if self.covered {
+        } else if self.covered && !self.prefs.always_show {
             BAR
         } else if !self.shelf.is_empty() {
             (CLOSED.0 + SHELF_CLOSED_EXTRA, CLOSED.1)
@@ -1262,39 +1385,30 @@ impl App {
             return;
         }
         self.shadow_key = key;
-        let rect_px = RECT { left: 0, top: 0, right: self.px_w, bottom: self.px_h };
-        if self.target.BindDC(self.shadow_dc, &rect_px).is_err() {
+        if self.shadow_bits.is_null() {
             return;
         }
-        let t: ID2D1RenderTarget = self.target.clone().into();
-        let brush: ID2D1Brush = self.brush.clone().into();
         let s = self.dpi_scale;
-        t.BeginDraw();
-        t.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
-        // No shadow on the thin bar; full shadow once the notch is its normal size.
+        let (width, height) = (self.px_w as usize, self.px_h as usize);
+        let _ = GdiFlush(); // GDI may still be using the bitmap
+        let pixels = std::slice::from_raw_parts_mut(self.shadow_bits, width * height);
+        // No shadow on the thin bar; full shadow once the notch is its normal size. A little
+        // deeper and softer when open.
         let strength = ((self.height.value - BAR.1) / (CLOSED.1 - BAR.1)).clamp(0.0, 1.0);
-        if strength > 0.0 {
-            // A blur, faked with stacked, ever-larger, very faint rounded rectangles around
-            // the notch (the notch window on top covers the middle). It grows with the notch:
-            // a tight shadow when closed, a wider, deeper one when open.
-            let open = self.openness().clamp(0.0, 1.0);
-            let w = self.width.value * s;
-            let h = self.height.value * s;
-            let cx = self.px_w as f32 / 2.0;
-            let corner = (MIN_CORNER + (MAX_CORNER - MIN_CORNER) * open) * s;
-            let spread = (10.0 + 18.0 * open) * s; // how far it reaches
-            let drop = (2.0 + 4.0 * open) * s; // shifted down: lit from above
-            let opacity = (0.05 + 0.02 * open) * strength;
-            const LAYERS: usize = 8;
-            self.brush.SetColor(&rgb(0x000000, 1.0));
-            for i in 1..=LAYERS {
-                let e = spread * i as f32 / LAYERS as f32;
-                let r = rect(cx - w / 2.0 - e, -e - corner, cx + w / 2.0 + e, h + drop + e);
-                self.brush.SetOpacity(opacity);
-                t.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r, radiusX: corner + e, radiusY: corner + e }, &brush);
-            }
-        }
-        let _ = t.EndDraw(None, None);
+        let open = self.openness().clamp(0.0, 1.0);
+        let notch = Outline {
+            cx: width as f32 / 2.0,
+            w: self.width.value * s,
+            h: self.height.value * s,
+            r: self.corner_radius(),
+            shoulder: (SHOULDER * s).min(self.height.value * s / 2.0),
+        };
+        let look = ShadowLook {
+            sigma: (1.4 + 0.8 * open) * s,
+            peak: (0.36 + 0.12 * open) * strength,
+            drop: (0.4 + 0.8 * open) * s,
+        };
+        paint_shadow(pixels, width, height, &notch, &look);
         let size = SIZE { cx: self.px_w, cy: self.px_h };
         let src = POINT { x: 0, y: 0 };
         let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
@@ -1811,7 +1925,7 @@ impl App {
         }
         let count = if self.in_settings { 0 } else { count };
         for (i, page) in pages.iter().enumerate().take(count) {
-            let offset = (i as f32 - pos) * card_w;
+            let offset = ring_offset(i, pos, count) * card_w;
             if offset.abs() >= card_w {
                 continue; // off-screen
             }
@@ -1824,7 +1938,7 @@ impl App {
                 Page::Network => self.draw_network(t, brush, alpha),
                 Page::System => self.draw_system(t, brush, alpha),
             };
-            if (i as f32 - pos).abs() < 0.001 {
+            if ring_offset(i, pos, count).abs() < 0.001 {
                 hits.extend(page_hits); // only the settled page is clickable
             }
         }
@@ -1845,7 +1959,8 @@ impl App {
         }
 
         // Gear, in the top-left corner, on Home only (fades with the slide).
-        let home_near = if self.in_settings { 0.0 } else { (1.0 - pos.abs()).clamp(0.0, 1.0) };
+        let home_at = ring_offset(0, pos, count.max(1));
+        let home_near = if self.in_settings { 0.0 } else { (1.0 - home_at.abs()).clamp(0.0, 1.0) };
         if home_near > 0.01 {
             // Inset past the left page strip, so reaching for it never switches pages.
             let (gx, gy) = (cx - card_w / 2.0 + (SIDE + 22.0) * s, 15.0 * s);
@@ -1854,7 +1969,7 @@ impl App {
             self.brush.SetColor(&rgb(if hot { 0xFFFFFF } else { 0x636366 }, 1.0));
             self.brush.SetOpacity(alpha * home_near);
             self.gfx.icon(t, Icon::Gear, gx, gy, 13.0 * s, brush);
-            if pos.abs() < 0.001 {
+            if home_at.abs() < 0.001 {
                 hits.insert(0, (rect(gx - 12.0 * s, 0.0, gx + 12.0 * s, gy + 12.0 * s), gear));
             }
         }
@@ -1879,12 +1994,12 @@ impl App {
             }
             // Page dots: the current page is a wider white pill (follows the slide).
             let (dot, wide, gap) = (5.0 * s, 16.0 * s, 6.0 * s);
-            let widths: Vec<f32> = (0..count).map(|i| dot + (wide - dot) * (1.0 - (i as f32 - pos).abs()).clamp(0.0, 1.0)).collect();
+            let widths: Vec<f32> = (0..count).map(|i| dot + (wide - dot) * (1.0 - ring_offset(i, pos, count).abs()).clamp(0.0, 1.0)).collect();
             let total: f32 = widths.iter().sum::<f32>() + gap * (count - 1) as f32;
             let mut x = cx - total / 2.0;
             let y = h - 10.0 * s;
             for (i, w) in widths.iter().enumerate() {
-                let near = (1.0 - (i as f32 - pos).abs()).clamp(0.0, 1.0);
+                let near = (1.0 - ring_offset(i, pos, count).abs()).clamp(0.0, 1.0);
                 set(if near > 0.5 { 0xFFFFFF } else { 0x636366 }, 1.0);
                 let r = D2D1_ROUNDED_RECT { rect: rect(x, y - dot / 2.0, x + w, y + dot / 2.0), radiusX: dot / 2.0, radiusY: dot / 2.0 };
                 t.FillRoundedRectangle(&r, brush);
@@ -2016,13 +2131,15 @@ impl App {
                 hits.push((r, action));
             }
         };
-        // Shuffle/repeat stay clickable even when the app doesn't report them: we try, and
-        // show a notice if the app refuses.
-        let controllable = session.can_play_pause || session.can_next;
-        button(x_shuffle, 34.0, Icon::Shuffle, 16.0, Action::Shuffle, controllable, Some(session.shuffle == Some(true)));
+        // Shuffle/repeat only for apps that report them to Windows (no dead buttons).
+        if let Some(on) = session.shuffle {
+            button(x_shuffle, 34.0, Icon::Shuffle, 16.0, Action::Shuffle, true, Some(on));
+        }
         button(x_prev, 36.0, Icon::Previous, 20.0, Action::Previous, session.can_prev, None);
         button(x_next, 36.0, Icon::Next, 20.0, Action::Next, session.can_next, None);
-        button(x_repeat, 34.0, Icon::Repeat, 16.0, Action::Repeat, controllable, Some(matches!(session.repeat, Some(Repeat::All | Repeat::One))));
+        if let Some(mode) = session.repeat {
+            button(x_repeat, 34.0, Icon::Repeat, 16.0, Action::Repeat, true, Some(mode != Repeat::Off));
+        }
         if session.repeat == Some(Repeat::One) {
             set(0xFFFFFF, 1.0);
             self.gfx.text(t, "1", &self.gfx.fonts.badge, rect(at(x_repeat - 4.0), y(cy - 4.0), at(x_repeat + 4.0), y(cy + 4.0)), brush);
@@ -2042,8 +2159,22 @@ impl App {
     }
 
     fn settings_height(&self) -> f32 {
-        SETTINGS_TOP + (self.prefs.order.len() + 1) as f32 * SETTINGS_ROW + 72.0
+        match self.settings_tab {
+            TAB_GENERAL => SETTINGS_CONTENT + self.general_rows().len() as f32 * SETTINGS_ROW + 8.0,
+            TAB_MOTION => SETTINGS_CONTENT + 3.0 * SETTINGS_ROW + 8.0,
+            TAB_PAGES => SETTINGS_TOP + (self.prefs.order.len() + 1) as f32 * SETTINGS_ROW + 8.0,
+            _ => SETTINGS_CONTENT + 64.0,
+        }
     }
+
+    /// General tab rows: (switch action, label, note, on).
+    fn general_rows(&self) -> Vec<(Action, &'static str, &'static str, bool)> {
+        vec![
+            (Action::Startup, "Launch at startup", "Start with Windows", self.startup),
+            (Action::AlwaysShow, "Always show", "Stay full size over full-screen and maximised apps", self.prefs.always_show),
+        ]
+    }
+
 
     /// An iOS-style on/off switch (track `sw`×`sh` at x, centred on cy; design pixels).
     #[allow(clippy::too_many_arguments)]
@@ -2085,8 +2216,118 @@ impl App {
         set(0xFFFFFF, 1.0);
         self.gfx.text(t, "Done", &self.gfx.fonts.ring_value, dr, brush);
         hits.push((dr, done));
+        // Tabs: a segmented control under the title.
+        let seg = rect(at(0.0), y(42.0), at(w_box), y(66.0));
+        set(0x1C1C1E, 1.0);
+        t.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: seg, radiusX: y(12.0), radiusY: y(12.0) }, brush);
+        let seg_w = w_box / SETTINGS_TABS.len() as f32;
+        for (i, name) in SETTINGS_TABS.iter().enumerate() {
+            let r = rect(at(i as f32 * seg_w + 2.0), y(44.0), at((i + 1) as f32 * seg_w - 2.0), y(64.0));
+            let action = Action::SettingsTab(i);
+            if i == self.settings_tab || hovered(&action) {
+                set(if i == self.settings_tab { 0x3A3A3C } else { 0x2C2C2E }, 1.0);
+                t.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r, radiusX: y(10.0), radiusY: y(10.0) }, brush);
+            }
+            set(0xFFFFFF, if i == self.settings_tab { 1.0 } else { 0.6 });
+            self.gfx.text(t, name, &self.gfx.fonts.ring_value, r, brush);
+            if i != self.settings_tab {
+                hits.push((r, action));
+            }
+        }
+
+        match self.settings_tab {
+            TAB_GENERAL => {
+                for (i, (action, label, note, on)) in self.general_rows().into_iter().enumerate() {
+                    let top = SETTINGS_CONTENT + i as f32 * SETTINGS_ROW;
+                    self.draw_setting_row(t, brush, top, label, note, hovered(&action), alpha, ox, w_box);
+                    self.draw_switch(t, brush, w_box - 48.0, top + (SETTINGS_ROW - 4.0) / 2.0, on, alpha, ox);
+                    hits.push((rect(at(0.0), y(top), at(w_box), y(top + SETTINGS_ROW - 4.0)), action));
+                }
+                return hits;
+            }
+            TAB_MOTION => {
+                // Animation speed: ‹ name › on the right, stepping through SPEEDS.
+                let top = SETTINGS_CONTENT;
+                self.draw_setting_row(t, brush, top, "Animation speed", "", false, alpha, ox, w_box);
+                let (name, _) = settings::SPEEDS[self.prefs.speed];
+                let row = |x0: f32, x1: f32| rect(at(x0), y(top + 4.0), at(x1), y(top + SETTINGS_ROW - 8.0));
+                set(0x2C2C2E, 1.0);
+                t.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: row(w_box - 236.0, w_box - 6.0), radiusX: y(10.0), radiusY: y(10.0) }, brush);
+                set(0xFFFFFF, 1.0);
+                self.gfx.text(t, name, &self.gfx.fonts.ring_value, row(w_box - 206.0, w_box - 36.0), brush);
+                for (dir, x0, glyph) in [(-1i32, w_box - 236.0, "‹"), (1, w_box - 36.0, "›")] {
+                    let r = row(x0, x0 + 30.0);
+                    let next = self.prefs.speed as i32 + dir;
+                    let enabled = (0..settings::SPEEDS.len() as i32).contains(&next);
+                    let action = Action::Speed(next.max(0) as usize);
+                    if enabled && hovered(&action) {
+                        set(0x48484A, 1.0);
+                        t.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r, radiusX: y(10.0), radiusY: y(10.0) }, brush);
+                    }
+                    set(0xFFFFFF, if enabled { 1.0 } else { 0.25 });
+                    self.gfx.text(t, glyph, &self.gfx.fonts.title, r, brush);
+                    if enabled {
+                        hits.push((r, action));
+                    }
+                }
+
+                // Hover delay: a box you type seconds into, "s" after it.
+                let top = SETTINGS_CONTENT + SETTINGS_ROW;
+                let action = Action::DelayBox;
+                self.draw_setting_row(t, brush, top, "Hover delay", "0.15 – 1.5 seconds", false, alpha, ox, w_box);
+                let bx = rect(at(w_box - 96.0), y(top + 5.0), at(w_box - 30.0), y(top + SETTINGS_ROW - 9.0));
+                let editing = self.delay_edit.is_some();
+                set(if editing || hovered(&action) { 0x2C2C2E } else { 0x000000 }, 1.0);
+                t.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: bx, radiusX: y(8.0), radiusY: y(8.0) }, brush);
+                set(if editing { SHELF_BLUE } else { 0x48484A }, 1.0);
+                t.DrawRoundedRectangle(&D2D1_ROUNDED_RECT { rect: bx, radiusX: y(8.0), radiusY: y(8.0) }, brush, y(1.5), None);
+                let shown = self.delay_edit.clone().unwrap_or_else(|| settings::delay_text(self.prefs.hover_ms));
+                let text_x = w_box - 88.0;
+                set(0xFFFFFF, 1.0);
+                self.gfx.text(t, &shown, &self.gfx.fonts.bubble_text, rect(at(text_x), y(top), at(w_box - 34.0), y(top + SETTINGS_ROW - 4.0)), brush);
+                if editing && self.caret_on {
+                    let caret_x = text_x + self.gfx.measure(&shown, &self.gfx.fonts.bubble_text) / s + 1.0;
+                    set(SHELF_BLUE, 1.0);
+                    t.FillRectangle(&rect(at(caret_x), y(top + 10.0), at(caret_x + 1.5), y(top + SETTINGS_ROW - 14.0)), brush);
+                }
+                set(0x98989F, 1.0);
+                self.gfx.text(t, "s", &self.gfx.fonts.bubble_text, rect(at(w_box - 22.0), y(top), at(w_box), y(top + SETTINGS_ROW - 4.0)), brush);
+                hits.push((bx, action));
+
+                // Open on: Hover / Click / Both pills.
+                let top = SETTINGS_CONTENT + 2.0 * SETTINGS_ROW;
+                self.draw_setting_row(t, brush, top, "Open on", "", false, alpha, ox, w_box);
+                let pill_w = 62.0;
+                let x0 = w_box - 6.0 - pill_w * settings::OPEN_MODES.len() as f32;
+                for (k, option) in settings::OPEN_MODES.iter().enumerate() {
+                    let r = rect(at(x0 + k as f32 * pill_w + 2.0), y(top + 5.0), at(x0 + (k + 1) as f32 * pill_w - 2.0), y(top + SETTINGS_ROW - 9.0));
+                    let action = Action::OpenMode(k);
+                    let chosen = k == self.prefs.open_mode;
+                    if chosen || hovered(&action) {
+                        set(if chosen { 0x48484A } else { 0x2C2C2E }, 1.0);
+                        t.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r, radiusX: y(9.0), radiusY: y(9.0) }, brush);
+                    }
+                    set(0xFFFFFF, if chosen { 1.0 } else { 0.55 });
+                    self.gfx.text(t, option, &self.gfx.fonts.ring_value, r, brush);
+                    if !chosen {
+                        hits.push((r, action));
+                    }
+                }
+                return hits;
+            }
+            TAB_PAGES => {}
+            _ => {
+                let top = SETTINGS_CONTENT;
+                set(0xFFFFFF, 1.0);
+                self.gfx.text(t, "Dynamic Island for Windows", &self.gfx.fonts.pill, rect(at(0.0), y(top), at(w_box), y(top + 22.0)), brush);
+                set(0x98989F, 1.0);
+                let line = format!("Version {ABOUT_VERSION} · Made by {ABOUT_AUTHOR}");
+                self.gfx.text(t, &line, &self.gfx.fonts.time, rect(at(0.0), y(top + 24.0), at(w_box), y(top + 40.0)), brush);
+                return hits;
+            }
+        }
         set(0x6E6E73, 1.0);
-        self.gfx.text(t, "PAGES · DRAG A ROW TO REORDER", &self.gfx.fonts.kind, rect(at(0.0), y(34.0), at(400.0), y(SETTINGS_TOP - 2.0)), brush);
+        self.gfx.text(t, "DRAG A ROW TO REORDER", &self.gfx.fonts.kind, rect(at(0.0), y(SETTINGS_CONTENT), at(400.0), y(SETTINGS_TOP - 2.0)), brush);
 
         // Rows: Home (always on, always first), then your order. Each row is drawn at its
         // animated position; the grabbed row last, lifted above the others.
@@ -2143,16 +2384,28 @@ impl App {
             }
         }
 
-        // About
-        let top = SETTINGS_TOP + rows.len() as f32 * SETTINGS_ROW + 8.0;
-        set(0x6E6E73, 1.0);
-        self.gfx.text(t, "ABOUT", &self.gfx.fonts.kind, rect(at(0.0), y(top), at(200.0), y(top + 14.0)), brush);
-        set(0xFFFFFF, 1.0);
-        self.gfx.text(t, "Dynamic Island for Windows", &self.gfx.fonts.pill, rect(at(0.0), y(top + 16.0), at(w_box), y(top + 36.0)), brush);
-        set(0x98989F, 1.0);
-        let line = format!("Version {ABOUT_VERSION} · Made by {ABOUT_AUTHOR}");
-        self.gfx.text(t, &line, &self.gfx.fonts.time, rect(at(0.0), y(top + 36.0), at(w_box), y(top + 52.0)), brush);
         hits
+    }
+
+    /// A Settings row's background, label and grey note (the control on the right is drawn
+    /// by the caller).
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw_setting_row(&self, t: &ID2D1RenderTarget, brush: &ID2D1Brush, top: f32, label: &str, note: &str, hot: bool, alpha: f32, ox: f32, w_box: f32) {
+        let s = self.dpi_scale;
+        let at = |x: f32| ox + x * s;
+        let set = |hex: u32| {
+            self.brush.SetColor(&rgb(hex, 1.0));
+            self.brush.SetOpacity(alpha);
+        };
+        set(if hot { 0x2C2C2E } else { 0x1C1C1E });
+        let r = rect(at(0.0), top * s, at(w_box), (top + SETTINGS_ROW - 4.0) * s);
+        t.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r, radiusX: 10.0 * s, radiusY: 10.0 * s }, brush);
+        set(0xFFFFFF);
+        let text_r = |x0: f32, x1: f32| rect(at(x0), top * s, at(x1), (top + SETTINGS_ROW - 4.0) * s);
+        self.gfx.text(t, label, &self.gfx.fonts.pill, text_r(14.0, 300.0), brush);
+        let label_w = self.gfx.measure(label, &self.gfx.fonts.pill) / s;
+        set(0x6E6E73);
+        self.gfx.text(t, note, &self.gfx.fonts.time, text_r(14.0 + label_w + 10.0, w_box - 60.0), brush);
     }
 
     /// A file's thumbnail in a rounded square (dark tile behind icons; the extension if
@@ -2544,6 +2797,15 @@ impl App {
     ///  ‾‾\              /‾‾   <- shoulders curve out into the top edge of the screen
     ///     |            |
     ///      \__________/       <- rounded bottom corners
+    /// The notch's bottom corner radius in pixels: grows as the notch opens.
+    fn corner_radius(&self) -> f32 {
+        let s = self.dpi_scale;
+        let (w, h) = (self.width.value.max(1.0) * s, self.height.value.max(1.0) * s);
+        let shoulder = (SHOULDER * s).min(h / 2.0);
+        let t = self.openness().clamp(0.0, 1.0);
+        ((MIN_CORNER + (MAX_CORNER - MIN_CORNER) * t) * s).min((h - shoulder).max(0.0)).min(w / 2.0)
+    }
+
     unsafe fn notch_geometry(&self) -> Result<ID2D1PathGeometry> {
         let s = self.dpi_scale;
         let w = self.width.value.max(1.0) * s;
@@ -2551,12 +2813,8 @@ impl App {
         let cx = self.px_w as f32 / 2.0;
         let (left, right) = (cx - w / 2.0, cx + w / 2.0);
 
-        // Corners grow as the notch opens.
-        let t = self.openness().clamp(0.0, 1.0);
         let shoulder = (SHOULDER * s).min(h / 2.0); // smaller on the thin bar
-        let r = ((MIN_CORNER + (MAX_CORNER - MIN_CORNER) * t) * s)
-            .min((h - shoulder).max(0.0))
-            .min(w / 2.0);
+        let r = self.corner_radius();
         let (ks, kr) = (BEZIER_CIRCLE * shoulder, BEZIER_CIRCLE * r);
 
         let pt = |x: f32, y: f32| Vector2 { X: x, Y: y };
@@ -2610,18 +2868,30 @@ impl App {
         if !self.animating {
             self.animating = true;
             self.last_frame = None;
-            self.frames = 0;
-            self.anim_start = Instant::now();
         }
     }
 
     /// Slide to another page (wraps around), resizing the card to fit it.
     unsafe fn switch_page(&mut self, page: usize) {
         let count = self.page_count();
-        let page = page % count.max(1);
-        if page == self.page && (self.page_pos.target - page as f32).abs() < 0.001 {
+        self.slide_to(page % count.max(1), None);
+    }
+
+    /// One page forward (+1) or back (-1). The pages are a ring: forward from the last
+    /// page slides on to Home, back from Home slides on to the last page.
+    unsafe fn step_page(&mut self, dir: i32) {
+        let count = self.page_count().max(1);
+        let page = (self.page as i32 + dir).rem_euclid(count as i32) as usize;
+        self.slide_to(page, Some(dir));
+    }
+
+    /// Slide to `page`, `dir` pages along the ring (or the shorter way round if None).
+    unsafe fn slide_to(&mut self, page: usize, dir: Option<i32>) {
+        let count = self.page_count();
+        if page == self.page && ring_offset(page, self.page_pos.target, count).abs() < 0.001 {
             return;
         }
+        let step = dir.unwrap_or_else(|| ring_offset(page, self.page_pos.target, count).round() as i32);
         self.page = page;
         self.picker = None;
         self.net_list = None;
@@ -2631,8 +2901,12 @@ impl App {
             self.wifi.refresh_list();
             self.bt.refresh();
         }
-        self.page_pos.set_target(page as f32);
+        self.page_pos.set_target(self.page_pos.target + step as f32);
         self.last_page_switch = Instant::now();
+        if self.prefs.last != self.page_kind() {
+            self.prefs.last = self.page_kind();
+            self.prefs.save();
+        }
         self.hits.clear();
         self.set_hover_action(None);
         if self.hovered {
@@ -2654,10 +2928,9 @@ impl App {
         }
         self.wheel += delta;
         if self.wheel.abs() >= SCROLL_STEP {
-            let count = self.page_count();
-            let next = if self.wheel > 0 { self.page + 1 } else { self.page + count - 1 };
+            let dir = if self.wheel > 0 { 1 } else { -1 };
             self.wheel = 0;
-            self.switch_page(next);
+            self.step_page(dir);
         }
     }
 
@@ -2712,6 +2985,7 @@ impl App {
             None => 1.0 / self.refresh_hz,
         };
         self.last_frame = Some(now);
+        let dt = dt * settings::SPEEDS[self.prefs.speed].1; // Settings > Motion > Animation speed
 
         self.width.step(dt);
         self.height.step(dt);
@@ -2723,7 +2997,6 @@ impl App {
             row.step(dt);
         }
         let _ = self.render();
-        self.frames += 1;
 
         if self.width.is_settled()
             && self.height.is_settled()
@@ -2736,18 +3009,11 @@ impl App {
             if self.bubble.target == 0.0 {
                 self.bubble_flag = None;
             }
-            self.animating = false;
-            #[cfg(debug_assertions)]
-            {
-                let secs = self.anim_start.elapsed().as_secs_f32();
-                println!(
-                    "animation: {} frames in {:.0} ms = {:.0} fps (monitor: {:.0} Hz)",
-                    self.frames,
-                    secs * 1000.0,
-                    self.frames as f32 / secs,
-                    self.refresh_hz
-                );
+            // Slid round the ring past the end: same place, back in 0..count.
+            if self.page_pos.value != self.page as f32 {
+                self.page_pos = Ease::new(self.page as f32);
             }
+            self.animating = false;
         }
     }
 
@@ -2779,8 +3045,8 @@ impl App {
     unsafe fn on_click(&mut self, x: f32, y: f32) {
         let Some(action) = self.action_at(x, y).filter(Action::clickable) else { return };
         match action {
-            Action::PagePrev => return self.switch_page(self.page + self.page_count() - 1),
-            Action::PageNext => return self.switch_page(self.page + 1),
+            Action::PagePrev => return self.step_page(-1),
+            Action::PageNext => return self.step_page(1),
             Action::Mute => {
                 self.audio.toggle_mute();
                 self.sound.muted = !self.sound.muted;
@@ -2816,6 +3082,9 @@ impl App {
                 self.picker = None;
                 self.net_list = None;
                 self.in_settings = true;
+                self.settings_tab = TAB_GENERAL;
+                self.startup = startup::enabled();
+                self.update_stats_wanted();
                 self.sync_rows(true);
                 self.set_hover_action(None);
                 return self.set_expanded(true);
@@ -2824,6 +3093,7 @@ impl App {
                 self.in_settings = false;
                 self.page = 0;
                 self.page_pos = Ease::new(0.0);
+                self.update_stats_wanted();
                 self.set_hover_action(None);
                 return self.set_expanded(true);
             }
@@ -2833,6 +3103,41 @@ impl App {
                 return self.redraw();
             }
             Action::TabGrip(_) => return, // dragged, not clicked
+            Action::SettingsTab(i) => {
+                self.settings_tab = i;
+                self.reorder = None;
+                self.sync_rows(true);
+                self.set_hover_action(None);
+                return self.set_expanded(true);
+            }
+            Action::Startup => {
+                self.startup = startup::set(!self.startup);
+                return self.redraw();
+            }
+            Action::AlwaysShow => {
+                self.prefs.always_show = !self.prefs.always_show;
+                self.prefs.save();
+                self.set_bar_mode(self.covered && !self.hovered);
+                return self.redraw();
+            }
+            Action::Speed(k) => {
+                self.prefs.speed = k;
+                self.prefs.save();
+                return self.redraw();
+            }
+            Action::OpenMode(k) => {
+                self.prefs.open_mode = k;
+                self.prefs.save();
+                self.set_bar_mode(self.covered && !self.hovered);
+                return self.redraw();
+            }
+            Action::DelayBox => {
+                if self.delay_edit.is_none() {
+                    self.delay_edit = Some(String::new()); // type a fresh value
+                    self.take_keyboard();
+                }
+                return self.redraw();
+            }
             Action::Radio { bt } => {
                 let on = if bt { self.radio_state.bluetooth } else { self.radio_state.wifi };
                 if let Some(on) = on {
@@ -2925,8 +3230,10 @@ impl App {
         match action {
             Action::Tab(tab) => {
                 self.selected = Some(tab);
-                // Re-run selection + art upload with the sessions we already have.
-                let sessions = std::mem::take(&mut self.sessions);
+                // Re-run selection + art upload with the sessions we already have. A copy, not
+                // take(): with the list emptied the Music page would vanish for a moment and
+                // the notch would jump to the next page.
+                let sessions = self.sessions.clone();
                 self.apply_snapshot(MediaSnapshot { sessions, system_current: None, notice: None });
                 return;
             }
@@ -2966,7 +3273,13 @@ impl App {
             | Action::OpenSettings
             | Action::CloseSettings
             | Action::TabToggle(_)
-            | Action::TabGrip(_) => {}
+            | Action::TabGrip(_)
+            | Action::SettingsTab(_)
+            | Action::Startup
+            | Action::AlwaysShow
+            | Action::Speed(_)
+            | Action::OpenMode(_)
+            | Action::DelayBox => {}
             Action::Seek { x0, x1 } => {
                 if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
                     let target = (((x - x0) / (x1 - x0)).clamp(0.0, 1.0) as f64) * s.duration;
@@ -2988,7 +3301,11 @@ impl App {
 
     /// Mouse button down: start dragging a slider.
     unsafe fn on_press(&mut self, x: f32, y: f32) {
-        let Some(action) = self.action_at(x, y) else { return };
+        let action = self.action_at(x, y);
+        if self.delay_edit.is_some() && action != Some(Action::DelayBox) {
+            self.end_delay_edit(true); // clicked elsewhere: keep what was typed
+        }
+        let Some(action) = action else { return };
         if let Action::ShelfItem(i) = action {
             self.shelf_press = Some((i, x, y));
             return;
@@ -3109,13 +3426,17 @@ impl App {
         self.tracking = true;
     }
 
-    /// The pointer arrived: open the card (always on Home).
+    /// The pointer arrived: open the card on the page you were on last (Home if it's gone).
     unsafe fn open_card(&mut self) {
         self.set_bar_mode(false);
         self.hovered = true;
         self.hide_hud();
-        self.page = 0;
-        self.page_pos = Ease::new(0.0);
+        self.page = self.pages().iter().position(|p| *p == self.prefs.last).unwrap_or(0);
+        self.page_pos = Ease::new(self.page as f32);
+        if self.page_kind() == Page::Network {
+            self.wifi.refresh_list();
+            self.bt.refresh();
+        }
         self.wheel = 0;
         self.set_expanded(true);
         self.update_stats_wanted();
@@ -3124,6 +3445,7 @@ impl App {
     /// Close the card (pointer gone, or unpinned with the pointer away).
     unsafe fn close_card(&mut self) {
         self.close_password();
+        self.end_delay_edit(true);
         self.in_settings = false;
         self.leaving = false;
         self.hovered = false;
@@ -3138,6 +3460,9 @@ impl App {
     /// Bar mode: the window lets every click through to the app underneath, and we watch
     /// the pointer with a timer instead.
     unsafe fn set_bar_mode(&mut self, on: bool) {
+        // Always show: never the thin bar. Click to open: the bar takes clicks (and hovers,
+        // through the normal mouse path), so it isn't see-through to the mouse.
+        let on = on && !self.prefs.always_show && !self.prefs.click_opens();
         self.dwell_since = None;
         if on == self.click_through {
             return;
@@ -3181,7 +3506,7 @@ impl App {
         match (on_bar, self.dwell_since) {
             (false, _) => self.dwell_since = None,
             (true, None) => self.dwell_since = Some(Instant::now()),
-            (true, Some(since)) if since.elapsed() >= DWELL => {
+            (true, Some(since)) if since.elapsed() >= Duration::from_millis(self.prefs.hover_ms as u64) => {
                 self.open_card();
                 self.track_leave();
             }
@@ -3309,13 +3634,36 @@ impl App {
         if self.pw_ssid.is_none() {
             return;
         }
+        self.pw_focus = true;
+        self.take_keyboard();
+        self.redraw();
+    }
+
+    /// The notch normally never takes focus; it becomes an ordinary active window while you
+    /// type in one of its boxes (Wi-Fi password, hover delay), with a blinking caret.
+    unsafe fn take_keyboard(&mut self) {
         let style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
         SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style & !(WS_EX_NOACTIVATE.0 as isize));
         let _ = SetForegroundWindow(self.hwnd);
         let _ = SetFocus(Some(self.hwnd));
-        self.pw_focus = true;
         self.caret_on = true;
         SetTimer(Some(self.hwnd), CARET_TIMER, 530, None);
+    }
+
+    /// Typing in a box: stay open, and keys go to it.
+    fn typing(&self) -> bool {
+        self.pw_focus || self.delay_edit.is_some()
+    }
+
+    /// Back to never taking focus. If the pointer is already away, close like a normal leave.
+    unsafe fn release_keyboard(&mut self) {
+        let _ = KillTimer(Some(self.hwnd), CARET_TIMER);
+        let style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE.0 as isize);
+        if !self.tracking && !self.pinned && self.hovered {
+            self.leaving = true;
+            SetTimer(Some(self.hwnd), LEAVE_TIMER, LEAVE_MS, None);
+        }
         self.redraw();
     }
 
@@ -3325,15 +3673,18 @@ impl App {
             return;
         }
         self.pw_focus = false;
-        let _ = KillTimer(Some(self.hwnd), CARET_TIMER);
-        let style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
-        SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE.0 as isize);
-        if !self.tracking && !self.pinned && self.hovered {
-            // The pointer is already away: close like a normal leave.
-            self.leaving = true;
-            SetTimer(Some(self.hwnd), LEAVE_TIMER, LEAVE_MS, None);
+        self.release_keyboard();
+    }
+
+    /// Done typing a hover delay (Enter, clicked elsewhere): keep it if it's a number,
+    /// pulled into 0.15–1.5 s. `keep: false` (Esc) leaves the old value.
+    unsafe fn end_delay_edit(&mut self, keep: bool) {
+        let Some(text) = self.delay_edit.take() else { return };
+        if let Some(ms) = settings::parse_delay(&text).filter(|_| keep) {
+            self.prefs.hover_ms = ms;
+            self.prefs.save();
         }
-        self.redraw();
+        self.release_keyboard();
     }
 
     unsafe fn close_password(&mut self) {
@@ -3354,8 +3705,23 @@ impl App {
         self.blur_password();
     }
 
-    /// A key typed into the password field.
+    /// A key typed into the password field or the hover delay box.
     unsafe fn on_char(&mut self, ch: u32) {
+        if let Some(text) = &mut self.delay_edit {
+            match ch {
+                0x08 => {
+                    text.pop();
+                }
+                0x0D => return self.end_delay_edit(true),
+                0x1B => return self.end_delay_edit(false),
+                c if (c == u32::from(b'.') || char::from_u32(c).is_some_and(|c| c.is_ascii_digit())) && text.len() < 5 => {
+                    text.push(c as u8 as char);
+                }
+                _ => {}
+            }
+            self.caret_on = true;
+            return self.redraw();
+        }
         if !self.pw_focus {
             return;
         }
@@ -3529,7 +3895,15 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                         if app.click_through {
                             return; // bar mode: the poll timer decides
                         }
-                        app.open_card();
+                        if !app.prefs.hover_opens() {
+                            return; // Open on: Click
+                        }
+                        // Settings > Motion > Hover delay: open only if it's still here then.
+                        if !app.hover_pending {
+                            app.hover_pending = true;
+                            SetTimer(Some(hwnd), HOVER_TIMER, app.prefs.hover_ms, None);
+                        }
+                        return;
                     }
                     app.on_mouse_move(x, y);
                 });
@@ -3543,7 +3917,10 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
 
             // The password field lost the keyboard (you clicked another window).
             WM_KILLFOCUS => {
-                with_app(|app| app.blur_password());
+                with_app(|app| {
+                    app.blur_password();
+                    app.end_delay_edit(true);
+                });
                 LRESULT(0)
             }
 
@@ -3568,12 +3945,17 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             WM_MOUSELEAVE => {
                 with_app(|app| {
                     app.tracking = false;
+                    if app.hover_pending {
+                        // Left before the hover delay ran out: don't open.
+                        app.hover_pending = false;
+                        let _ = KillTimer(Some(hwnd), HOVER_TIMER);
+                    }
                     if app.dragging.is_some() || app.reorder.is_some() || !app.hovered {
                         return; // still dragging a slider or a row (the pointer may wander off)
                     }
                     app.set_hover_action(None);
                     app.redraw();
-                    if app.pinned || app.pw_focus {
+                    if app.pinned || app.typing() {
                         return; // pinned, or typing a password: stay open
                     }
                     // Don't close straight away: a pointer that slips off for a moment
@@ -3584,10 +3966,22 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
                 LRESULT(0)
             }
 
+            WM_TIMER if wparam.0 == HOVER_TIMER => {
+                let _ = KillTimer(Some(hwnd), HOVER_TIMER);
+                with_app(|app| {
+                    let pending = std::mem::take(&mut app.hover_pending);
+                    if pending && !app.hovered && !app.click_through && app.pointer_over_notch() {
+                        app.open_card();
+                        app.track_leave();
+                    }
+                });
+                LRESULT(0)
+            }
+
             WM_TIMER if wparam.0 == LEAVE_TIMER => {
                 let _ = KillTimer(Some(hwnd), LEAVE_TIMER);
                 with_app(|app| {
-                    if !app.leaving || app.pinned || app.pw_focus {
+                    if !app.leaving || app.pinned || app.typing() {
                         app.leaving = false;
                         return;
                     }
@@ -3637,7 +4031,17 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
 
             WM_LBUTTONDOWN => {
                 let (x, y) = mouse_pos(lparam);
-                with_app(|app| app.on_press(x, y));
+                with_app(|app| {
+                    if !app.hovered && app.prefs.click_opens() {
+                        // Open on: Click / Both — open now, no hover delay.
+                        app.hover_pending = false;
+                        let _ = KillTimer(Some(hwnd), HOVER_TIMER);
+                        app.open_card();
+                        app.track_leave();
+                        return;
+                    }
+                    app.on_press(x, y);
+                });
                 LRESULT(0)
             }
 
@@ -3852,5 +4256,253 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
 
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use Status::{Paused, Playing, Stopped};
+
+    // F2: the media source you picked stays put.
+    #[test]
+    fn source_stays_when_another_app_starts_playing() {
+        let s = [("spotify", Paused), ("chrome", Playing)];
+        assert_eq!(pick_source(Some("spotify"), &s, Some("chrome")).as_deref(), Some("spotify"));
+    }
+
+    #[test]
+    fn source_ignores_windows_current_changing() {
+        let s = [("spotify", Playing), ("chrome", Playing)];
+        assert_eq!(pick_source(Some("spotify"), &s, Some("chrome")).as_deref(), Some("spotify"));
+    }
+
+    #[test]
+    fn second_browser_session_can_stay_selected() {
+        let s = [("chrome", Playing), ("chrome#1", Paused)];
+        assert_eq!(pick_source(Some("chrome#1"), &s, Some("chrome")).as_deref(), Some("chrome#1"));
+    }
+
+    #[test]
+    fn source_gone_falls_back_to_playing_windows_current_first() {
+        let s = [("vlc", Playing), ("chrome", Playing)];
+        assert_eq!(pick_source(Some("spotify"), &s, Some("chrome")).as_deref(), Some("chrome"));
+        assert_eq!(pick_source(Some("spotify"), &s, None).as_deref(), Some("vlc"));
+    }
+
+    #[test]
+    fn stopped_source_counts_as_gone() {
+        let s = [("spotify", Stopped), ("chrome", Paused)];
+        assert_eq!(pick_source(Some("spotify"), &s, None).as_deref(), Some("chrome"));
+    }
+
+    #[test]
+    fn nothing_selected_prefers_playing_then_paused() {
+        let s = [("spotify", Paused), ("chrome", Paused), ("vlc", Playing)];
+        assert_eq!(pick_source(None, &s, Some("chrome")).as_deref(), Some("vlc"));
+        let s = [("spotify", Paused), ("chrome", Paused)];
+        assert_eq!(pick_source(None, &s, Some("chrome")).as_deref(), Some("chrome"));
+        assert_eq!(pick_source(None, &s, None).as_deref(), Some("spotify"));
+    }
+
+    #[test]
+    fn all_stopped_shows_nothing() {
+        assert_eq!(pick_source(Some("spotify"), &[("spotify", Stopped)], Some("spotify")), None);
+        assert_eq!(pick_source(None, &[], None), None);
+    }
+
+    /// Frames (at 60 Hz) a spring takes to settle at an animation speed.
+    fn frames_to_settle(config: spring::SpringConfig, speed: f32) -> u32 {
+        let mut sp = Spring::new(0.0);
+        sp.set_target(100.0, config);
+        let mut frames = 0;
+        while !sp.is_settled() && frames < 10_000 {
+            sp.step(1.0 / 60.0 * speed);
+            frames += 1;
+        }
+        frames
+    }
+
+    // F6: the speed setting makes every animation quicker or slower, same shape.
+    #[test]
+    fn animation_speed_orders_settle_times() {
+        for config in [EXPAND, COLLAPSE] {
+            let frames = settings::SPEEDS.map(|(_, k)| frames_to_settle(config, k));
+            assert!(frames.windows(2).all(|w| w[0] > w[1]), "each speed is quicker: {frames:?}");
+            assert!(frames[0] < 120, "Slow is never sluggish: {frames:?}");
+            assert!(frames[6] <= 8, "Wally West is all but instant: {frames:?}");
+        }
+    }
+
+    #[test]
+    fn wally_west_stays_stable() {
+        // 10× time per frame mustn't blow the springs up: they still land exactly.
+        for config in [EXPAND, COLLAPSE, POP_IN, ROW] {
+            let mut sp = Spring::new(0.0);
+            sp.set_target(300.0, config);
+            for _ in 0..60 {
+                sp.step(1.0 / 60.0 * 10.0);
+                assert!(sp.value.is_finite() && sp.value.abs() < 600.0);
+            }
+            assert_eq!(sp.value, 300.0);
+        }
+        let mut e = Ease::new(0.0);
+        e.set_target(5.0);
+        for _ in 0..10 {
+            e.step(1.0 / 60.0 * 10.0);
+        }
+        assert_eq!(e.value, 5.0);
+    }
+
+    fn sample_notch() -> Outline {
+        Outline { cx: 400.0, w: 300.0, h: 200.0, r: 30.0, shoulder: 10.0 }
+    }
+
+    // Shadow shader: the distance field matches the notch's shape.
+    #[test]
+    fn outline_distance_is_exact() {
+        let n = sample_notch();
+        assert!(n.distance(400.0, 200.0).abs() < 1e-4); // bottom edge
+        assert!((n.distance(400.0, 210.0) - 10.0).abs() < 1e-4); // 10 below
+        assert!((n.distance(560.0, 50.0) - 10.0).abs() < 1e-4); // 10 right of the side
+        assert!((n.distance(400.0, 150.0) + 50.0).abs() < 1e-4); // inside
+        // Corner: 10 px out along the diagonal from the corner's centre.
+        let (ccx, ccy) = (550.0 - 30.0, 200.0 - 30.0);
+        let k = (30.0 + 10.0) / 2f32.sqrt();
+        assert!((n.distance(ccx + k, ccy + k) - 10.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn shadow_is_thin_smooth_and_hugs_the_edge() {
+        for sigma in [1.6, 2.8, 3.5] {
+            let look = ShadowLook { sigma, peak: 0.5, drop: 1.0 };
+            let mut last = look.alpha(0.0);
+            for tenth in 1..300 {
+                let now = look.alpha(tenth as f32 / 10.0);
+                assert!(now <= last, "only gets lighter going out");
+                assert!(last - now < 0.02, "no hard step ({last} -> {now})");
+                last = now;
+            }
+            // Gone (under one 8-bit step) within ~3.5 sigma of the edge: a few pixels.
+            assert!(look.alpha(look.reach() - look.drop) * 255.0 < 0.5);
+            assert!(look.reach() < 14.0, "stays close to the edge ({})", look.reach());
+        }
+    }
+
+    #[test]
+    fn painted_shadow_has_no_banding() {
+        let n = Outline { cx: 400.0, w: 300.0, h: 600.0, r: 30.0, shoulder: 10.0 };
+        let look = ShadowLook { sigma: 3.0, peak: 0.45, drop: 0.0 };
+        let (w, h) = (800usize, 700usize);
+        let mut px = vec![0u32; w * h];
+        paint_shadow(&mut px, w, h, &n, &look);
+        // Down the straight right side, each column's average matches the smooth curve to
+        // well within one 8-bit step: dithered, not stair-stepped.
+        let right = (n.cx + n.w / 2.0) as usize;
+        for x in right..right + 10 {
+            let mean: f32 = (100..500).map(|y| (px[y * w + x] >> 24) as f32).sum::<f32>() / 400.0;
+            let want = look.alpha(x as f32 + 0.5 - (n.cx + n.w / 2.0)) * 255.0;
+            assert!((mean - want).abs() < 0.3, "column {x}: {mean} vs {want}");
+        }
+        // Nothing beyond the reach; nothing deep inside; colour stays black (premultiplied).
+        assert!(px.iter().all(|p| p & 0x00FF_FFFF == 0));
+        assert_eq!(px[300 * w + right + 20] >> 24, 0);
+        assert_eq!(px[300 * w + 400] >> 24, 0);
+    }
+
+    #[test]
+    fn painted_shadow_fits_the_window() {
+        // A notch wider than the window, and a zero-strength shadow, are both safe.
+        let mut px = vec![7u32; 50 * 20];
+        paint_shadow(&mut px, 50, 20, &Outline { cx: 25.0, w: 80.0, h: 30.0, r: 10.0, shoulder: 8.0 }, &ShadowLook { sigma: 3.0, peak: 0.4, drop: 1.0 });
+        paint_shadow(&mut px, 50, 20, &sample_notch(), &ShadowLook { sigma: 3.0, peak: 0.0, drop: 1.0 });
+        assert!(px.iter().all(|p| *p == 0));
+    }
+
+    // One-way page loop: pages sit on a ring.
+    #[test]
+    fn ring_offset_wraps_the_short_way() {
+        // 4 pages, sitting on page 3 (the last): page 0 (Home) is just ahead, not 3 back.
+        assert_eq!(ring_offset(0, 3.0, 4), 1.0);
+        assert_eq!(ring_offset(2, 3.0, 4), -1.0);
+        // Sitting on Home: the last page is just behind.
+        assert_eq!(ring_offset(3, 0.0, 4), -1.0);
+        assert_eq!(ring_offset(1, 0.0, 4), 1.0);
+        assert_eq!(ring_offset(1, 1.0, 4), 0.0);
+        assert_eq!(ring_offset(0, 0.0, 0), 0.0); // no pages: no crash
+    }
+
+    #[test]
+    fn last_to_home_slides_forward_smoothly() {
+        // Slide position goes 3 -> 4 (past the end). Home must come in from the right and
+        // the last page leave to the left, each moving one way only, never jumping.
+        let (count, steps) = (4, 100);
+        let mut last = (ring_offset(0, 3.0, count), ring_offset(3, 3.0, count));
+        for k in 1..=steps {
+            let pos = 3.0 + k as f32 / steps as f32;
+            let now = (ring_offset(0, pos, count), ring_offset(3, pos, count));
+            assert!(now.0 < last.0 && now.0 >= 0.0, "Home moves left into place");
+            assert!(now.1 < last.1 && now.1 >= -1.0, "last page moves left out");
+            assert!((last.0 - now.0) < 0.02 && (last.1 - now.1) < 0.02, "no jump");
+            last = now;
+        }
+        assert_eq!(ring_offset(0, 4.0, count), 0.0); // Home exactly in place
+    }
+
+    #[test]
+    fn home_to_last_slides_backward_smoothly() {
+        let count = 5;
+        let mut last = ring_offset(4, 0.0, count);
+        for k in 1..=100 {
+            let pos = -(k as f32) / 100.0;
+            let now = ring_offset(4, pos, count);
+            assert!(now > last && now <= 0.0 && now - last < 0.02);
+            last = now;
+        }
+    }
+
+    #[test]
+    fn two_pages_still_slide() {
+        // With 2 pages forward from page 1 goes on to page 0 from the right.
+        assert_eq!(ring_offset(0, 1.0, 2), 1.0);
+        assert!((ring_offset(0, 1.5, 2) - 0.5).abs() < 1e-6);
+        assert!((ring_offset(1, 1.5, 2) + 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn flare_distance_is_exact() {
+        // sample_notch: half width 150 (right side at x 550), flare radius 10.
+        let n = sample_notch();
+        // Facing the flare's curve: straight out from its centre (560, 10).
+        let d = n.distance(553.0, 3.0);
+        assert!((d - (10.0 - (49.0f32 * 2.0).sqrt())).abs() < 1e-4, "{d}");
+        assert!(n.distance(551.0, 1.0) < 0.0, "inside the flare");
+        // Beyond the flare: its tip at the screen edge (560, 0) is nearest.
+        assert!((n.distance(565.0, 0.0) - 5.0).abs() < 1e-4);
+        assert!((n.distance(563.0, 4.0) - 5.0).abs() < 1e-4);
+        // Below it: the straight side again.
+        assert!((n.distance(556.0, 40.0) - 6.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn shadow_wraps_the_flare_smoothly() {
+        // Rework after on-screen review: the shadow must run round the flared top corners
+        // with no hard start (an earlier version began abruptly part-way down the side) and
+        // no crease out to the side; nothing at the screen edge itself.
+        let n = sample_notch();
+        let look = ShadowLook { sigma: 2.5, peak: 0.45, drop: 1.0 };
+        let (w, h) = (800usize, 300usize);
+        let mut px = vec![0u32; w * h];
+        paint_shadow(&mut px, w, h, &n, &look);
+        let a = |x: usize, y: usize| (px[y * w + x] >> 24) as i32;
+        assert!((0..w).all(|x| a(x, 0) <= 1), "nothing on the screen edge row");
+        // Just outside the side, top to bottom: rises gently, no jumps.
+        let side = 552;
+        let column: Vec<i32> = (0..80).map(|y| a(side, y)).collect();
+        assert!(column.windows(2).all(|p| (p[1] - p[0]).abs() <= 12), "{column:?}");
+        assert!(column[60] >= (0.45 * 255.0 * 0.6) as i32, "full shadow down the side");
+        // Out to the side at the flare's height: fades away, no crease.
+        let row: Vec<i32> = (550..590).map(|x| a(x, 10)).collect();
+        assert!(row.windows(2).all(|p| p[1] <= p[0] + 2), "only fades going out: {row:?}");
     }
 }

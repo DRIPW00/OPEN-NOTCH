@@ -12,7 +12,7 @@ use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use windows::core::HSTRING;
+use windows::core::{Interface, IUnknown, HSTRING};
 use windows::Foundation::TypedEventHandler;
 use windows::Media::Control::*;
 use windows::Media::MediaPlaybackAutoRepeatMode;
@@ -23,7 +23,6 @@ use windows::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
 use windows::Win32::System::WinRT::{CreateStreamOverRandomAccessStream, RoInitialize, RO_INIT_MULTITHREADED};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
-use crate::uia;
 
 /// Posted to the notch window whenever a new snapshot is ready.
 pub const WM_MEDIA_UPDATE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 2;
@@ -134,11 +133,7 @@ impl Media {
             .spawn(move || unsafe {
                 let _ = RoInitialize(RO_INIT_MULTITHREADED);
                 let notify = HWND(notify as *mut _);
-                let Ok(mut reader) = Reader::new(worker_tx) else {
-                    #[cfg(debug_assertions)]
-                    println!("media: system media controls unavailable");
-                    return;
-                };
+                let Ok(mut reader) = Reader::new(worker_tx) else { return }; // no media controls on this PC
                 reader.publish(&worker_latest, notify);
                 loop {
                     // Wake on a change, or every few seconds to stay in sync regardless.
@@ -183,15 +178,11 @@ impl Media {
 
 struct Subscribed {
     session: GlobalSystemMediaTransportControlsSession,
-    id: String,
     tokens: [i64; 3],
 }
 
 struct Reader {
     notice: Option<String>,
-    /// Shuffle/repeat states we set by pressing the app's own buttons (see uia.rs),
-    /// for apps that don't report them to Windows. Keyed by session id.
-    pressed: HashMap<String, (Option<bool>, Option<Repeat>)>,
     manager: GlobalSystemMediaTransportControlsSessionManager,
     tx: Sender<Msg>,
     subscribed: Vec<Subscribed>,
@@ -224,7 +215,6 @@ impl Reader {
         let wic = CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER).ok();
         Ok(Reader {
             notice: None,
-            pressed: HashMap::new(),
             manager,
             tx,
             subscribed: Vec::new(),
@@ -243,12 +233,10 @@ impl Reader {
 
     /// Listen for changes on each session (song, play state, position).
     fn resubscribe(&mut self, sessions: &[GlobalSystemMediaTransportControlsSession]) {
-        let ids: Vec<String> = sessions
-            .iter()
-            .map(|s| s.SourceAppUserModelId().map(|id| id.to_string()).unwrap_or_default())
-            .collect();
-        let same = ids.len() == self.subscribed.len()
-            && ids.iter().zip(&self.subscribed).all(|(a, b)| a == &b.id);
+        // Same session objects, not just the same app ids: an app can swap a session for a new one.
+        let identity = |s: &GlobalSystemMediaTransportControlsSession| s.cast::<IUnknown>().ok();
+        let same = sessions.len() == self.subscribed.len()
+            && sessions.iter().zip(&self.subscribed).all(|(a, b)| identity(a) == identity(&b.session));
         if same {
             return;
         }
@@ -257,7 +245,7 @@ impl Reader {
             let _ = old.session.RemovePlaybackInfoChanged(old.tokens[1]);
             let _ = old.session.RemoveTimelinePropertiesChanged(old.tokens[2]);
         }
-        for (session, id) in sessions.iter().zip(ids) {
+        for session in sessions {
             let make = || {
                 let tx = self.tx.clone();
                 move || {
@@ -280,7 +268,7 @@ impl Reader {
                 })),
             ];
             if let [Ok(a), Ok(b), Ok(c)] = tokens {
-                self.subscribed.push(Subscribed { session: session.clone(), id, tokens: [a, b, c] });
+                self.subscribed.push(Subscribed { session: session.clone(), tokens: [a, b, c] });
             }
         }
     }
@@ -292,16 +280,16 @@ impl Reader {
         let mut seen: HashMap<String, u32> = HashMap::new();
         let mut out = Vec::new();
         for session in &sessions {
+            // Two sessions from one app get distinct ids: "#n" is the session's position among
+            // all of that app's sessions (skipped ones included), as run() looks it up.
+            let app = session.SourceAppUserModelId().map(|id| id.to_string()).unwrap_or_default();
+            let n = seen.entry(app).or_insert(0);
+            let index = *n;
+            *n += 1;
             if let Some(mut info) = self.read_session(session) {
-                // Two sessions from one app get distinct ids.
-                let n = seen.entry(info.id.clone()).or_insert(0);
-                if *n > 0 {
-                    info.id = format!("{}#{}", info.id, n);
-                }
-                *n += 1;
-                if let Some((shuffle, repeat)) = self.pressed.get(&info.id) {
-                    info.shuffle = info.shuffle.or(*shuffle);
-                    info.repeat = info.repeat.or(*repeat);
+                if index > 0 {
+                    info.id = format!("{}#{}", info.id, index);
+                    info.app_name = format!("{} {}", info.app_name, index + 1); // "Chrome 2"
                 }
                 out.push(info);
             }
@@ -347,8 +335,12 @@ impl Reader {
 
         let playback = session.GetPlaybackInfo().ok()?;
         let status = match playback.PlaybackStatus().ok()? {
-            GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing => Status::Playing,
-            GlobalSystemMediaTransportControlsSessionPlaybackStatus::Paused => Status::Paused,
+            // "Changing" (between tracks) and "Opened" are brief in-between states: counting
+            // them as stopped would drop the source you picked (see pick_source).
+            GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing
+            | GlobalSystemMediaTransportControlsSessionPlaybackStatus::Changing => Status::Playing,
+            GlobalSystemMediaTransportControlsSessionPlaybackStatus::Paused
+            | GlobalSystemMediaTransportControlsSessionPlaybackStatus::Opened => Status::Paused,
             _ => Status::Stopped,
         };
         let controls = playback.Controls().ok()?;
@@ -476,7 +468,6 @@ impl Reader {
             | Command::CycleRepeat(id) => id.clone(),
         };
         // Ids may carry a "#n" suffix for a second session from the same app.
-        let full_id = id.clone();
         let (base, index) = match id.rsplit_once('#') {
             Some((base, n)) => (base.to_string(), n.parse::<usize>().unwrap_or(0)),
             None => (id, 0),
@@ -519,34 +510,11 @@ impl Reader {
                 s.TryChangeAutoRepeatModeAsync(next).and_then(|op| op.join())
             }
         };
-        // Browsers and Apple Music refuse shuffle/repeat through the media controls.
-        // Fall back to pressing the app's own button (uia.rs).
+        // Shuffle/repeat are only shown for apps that report them, but an app can still refuse.
         if let Some(what) = refused {
             if !worked.unwrap_or(false) {
                 let app = s.SourceAppUserModelId().map(|id| app_name(&id.to_string())).unwrap_or_default();
-                let title = s
-                    .TryGetMediaPropertiesAsync()
-                    .and_then(|op| op.join())
-                    .and_then(|p| p.Title())
-                    .map(|t| t.to_string())
-                    .unwrap_or_default();
-                let playing = s
-                    .GetPlaybackInfo()
-                    .and_then(|p| p.PlaybackStatus())
-                    .is_ok_and(|st| st == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing);
-                let kind = if what == "shuffle" { uia::Kind::Shuffle } else { uia::Kind::Repeat };
-                match unsafe { uia::press(&app, &title, playing, kind) } {
-                    Some(result) => {
-                        let entry = self.pressed.entry(full_id).or_default();
-                        if kind == uia::Kind::Shuffle {
-                            // Unknown state (e.g. a one-off "shuffle the queue" button): show off.
-                            entry.0 = result.shuffle.or(Some(false));
-                        } else {
-                            entry.1 = result.repeat.or(entry.1);
-                        }
-                    }
-                    None => self.notice = Some(format!("Couldn't find {app}'s {what} button")),
-                }
+                self.notice = Some(format!("{app} didn't change {what}"));
             }
         }
     }

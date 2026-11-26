@@ -49,17 +49,23 @@ pub fn clock() -> Clock {
             let n = GetTimeFormatEx(PCWSTR::null(), flags, Some(&t), PCWSTR::null(), Some(&mut buffer));
             text(&buffer, n)
         };
+        // An explicit "tt" gives AM/PM even on a 24-hour clock, so ask only if the format uses it.
         let marker = {
-            let mut buffer = [0u16; 16];
-            let n = GetTimeFormatEx(PCWSTR::null(), TIME_FORMAT_FLAGS(0), Some(&t), w!("tt"), Some(&mut buffer));
-            text(&buffer, n)
+            let mut format = [0u16; 80];
+            let n = GetLocaleInfoEx(PCWSTR::null(), LOCALE_STIMEFORMAT, Some(&mut format));
+            if text(&format, n).contains('t') {
+                let mut buffer = [0u16; 16];
+                let n = GetTimeFormatEx(PCWSTR::null(), TIME_FORMAT_FLAGS(0), Some(&t), w!("tt"), Some(&mut buffer));
+                text(&buffer, n)
+            } else {
+                String::new()
+            }
         };
         let date = |format: PCWSTR| {
             let mut buffer = [0u16; 64];
             let n = GetDateFormatEx(PCWSTR::null(), ENUM_DATE_FORMATS_FLAGS(0), Some(&t), format, Some(&mut buffer), PCWSTR::null());
             text(&buffer, n)
         };
-        // 24-hour clocks have no AM/PM: TIME_NOTIMEMARKER then gives e.g. "13:08".
         Clock {
             short: time(TIME_NOSECONDS | TIME_NOTIMEMARKER).trim().to_string(),
             marker: marker.trim().to_string(),
