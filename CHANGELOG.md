@@ -1,5 +1,14 @@
 # Changelog
 
+## R1.03
+
+### Fixed
+- Album art could stay blank for the first song after opening Apple Music, until you skipped tracks. The notch now reloads the cover when the app signals a change, and for the first 30 seconds of each song it also notices when the app quietly swaps a placeholder for the real cover.
+
+### Under the hood
+- More of the code is split into smaller files (window, home); no change in behaviour.
+- 71 automatic tests.
+
 ## R1.02
 
 ### New

@@ -110,6 +110,8 @@ pub enum Command {
 
 enum Msg {
     Changed,
+    /// A session's song details changed (title, artist or cover): decode its art again.
+    PropsChanged,
     Command(Command),
 }
 
@@ -143,19 +145,12 @@ impl Media {
                         Err(RecvTimeoutError::Disconnected) => return,
                     };
                     let mut changed = first.is_none();
-                    let mut handle = |msg: Msg, reader: &mut Reader| match msg {
-                        Msg::Changed => changed = true,
-                        Msg::Command(cmd) => {
-                            reader.run(cmd);
-                            changed = true;
-                        }
-                    };
                     if let Some(msg) = first {
-                        handle(msg, &mut reader);
+                        changed |= reader.handle(msg);
                     }
                     // Apps often fire several events at once: gather them for a moment.
                     while let Ok(msg) = rx.recv_timeout(Duration::from_millis(25)) {
-                        handle(msg, &mut reader);
+                        changed |= reader.handle(msg);
                     }
                     if changed {
                         reader.publish(&worker_latest, notify);
@@ -176,6 +171,32 @@ impl Media {
     }
 }
 
+/// A song's decoded cover, the size of the picture it came from, and when it was read.
+struct Cached {
+    art: Arc<Art>,
+    size: u64,
+    at: Instant,
+}
+
+/// How long after loading a cover it is still checked for a silent swap (see `cover_swapped`).
+const COVER_WATCH: Duration = Duration::from_secs(30);
+
+/// Just after Apple Music opens, its first song gets a placeholder cover that the app later
+/// replaces with the real one without signalling anything. While a cover is young, a
+/// different picture size means it was swapped and should be loaded again.
+fn cover_swapped(cached_size: u64, now_size: Option<u64>, age: Duration) -> bool {
+    age < COVER_WATCH && now_size.is_some_and(|n| n != cached_size)
+}
+
+/// The song's cover picture, opened for reading, and its size in bytes.
+fn open_thumb(
+    props: &GlobalSystemMediaTransportControlsSessionMediaProperties,
+) -> Option<(windows::Storage::Streams::IRandomAccessStreamWithContentType, u64)> {
+    let stream = props.Thumbnail().ok()?.OpenReadAsync().ok()?.join().ok()?;
+    let size = stream.Size().ok()?;
+    Some((stream, size))
+}
+
 struct Subscribed {
     session: GlobalSystemMediaTransportControlsSession,
     tokens: [i64; 3],
@@ -187,7 +208,7 @@ struct Reader {
     tx: Sender<Msg>,
     subscribed: Vec<Subscribed>,
     wic: Option<IWICImagingFactory>,
-    art_cache: HashMap<u64, Arc<Art>>,
+    art_cache: HashMap<u64, Cached>,
     /// The last published snapshot had no sessions (so an empty one changes nothing).
     published_empty: bool,
 }
@@ -224,6 +245,18 @@ impl Reader {
         })
     }
 
+    /// Act on one message; true if the snapshot needs refreshing.
+    fn handle(&mut self, msg: Msg) -> bool {
+        match msg {
+            Msg::Changed => {}
+            // Apple Music sends a song's title first and its cover a moment later, in a second
+            // signal; reusing the cached art would keep a missing or stale cover all song long.
+            Msg::PropsChanged => self.art_cache.clear(),
+            Msg::Command(cmd) => self.run(cmd),
+        }
+        true
+    }
+
     fn sessions(&self) -> Vec<GlobalSystemMediaTransportControlsSession> {
         self.manager
             .GetSessions()
@@ -246,13 +279,13 @@ impl Reader {
             let _ = old.session.RemoveTimelinePropertiesChanged(old.tokens[2]);
         }
         for session in sessions {
-            let make = || {
+            let make = |msg: fn() -> Msg| {
                 let tx = self.tx.clone();
                 move || {
-                    let _ = tx.send(Msg::Changed);
+                    let _ = tx.send(msg());
                 }
             };
-            let (a, b, c) = (make(), make(), make());
+            let (a, b, c) = (make(|| Msg::PropsChanged), make(|| Msg::Changed), make(|| Msg::Changed));
             let tokens = [
                 session.MediaPropertiesChanged(&TypedEventHandler::new(move |_, _| {
                     a();
@@ -387,16 +420,28 @@ impl Reader {
             }
         }
 
-        // Album art (cached per song).
+        // Album art: cached per song, but re-checked while young (see cover_swapped).
         let key = hash(&[&id, &title, &artist, &album]);
-        let art = match self.art_cache.get(&key) {
-            Some(art) => Some(art.clone()),
-            None => {
-                let art = props.Thumbnail().ok().and_then(|thumb| self.decode_art(&thumb, key)).map(Arc::new);
-                if let Some(art) = &art {
-                    self.art_cache.insert(key, art.clone());
+        let cached = self.art_cache.get(&key).map(|c| (c.art.clone(), c.size, c.at));
+        let art = match cached {
+            Some((art, _, at)) if at.elapsed() >= COVER_WATCH => Some(art),
+            cached => {
+                let thumb = open_thumb(&props);
+                let now_size = thumb.as_ref().map(|(_, n)| *n);
+                match cached {
+                    Some((art, size, at)) if !cover_swapped(size, now_size, at.elapsed()) => Some(art),
+                    cached => {
+                        let fresh = thumb.and_then(|(stream, size)| Some((Arc::new(self.decode_art(&stream, key)?), size)));
+                        match fresh {
+                            Some((art, size)) => {
+                                let at = cached.map(|(_, _, at)| at).unwrap_or_else(Instant::now);
+                                self.art_cache.insert(key, Cached { art: art.clone(), size, at });
+                                Some(art)
+                            }
+                            None => cached.map(|(art, _, _)| art), // keep what we had
+                        }
+                    }
                 }
-                art
             }
         };
 
@@ -421,12 +466,11 @@ impl Reader {
 
     unsafe fn decode_art(
         &self,
-        thumb: &windows::Storage::Streams::IRandomAccessStreamReference,
+        stream: &windows::Storage::Streams::IRandomAccessStreamWithContentType,
         key: u64,
     ) -> Option<Art> {
         let wic = self.wic.as_ref()?;
-        let stream = thumb.OpenReadAsync().ok()?.join().ok()?;
-        let stream: IStream = CreateStreamOverRandomAccessStream(&stream).ok()?;
+        let stream: IStream = CreateStreamOverRandomAccessStream(stream).ok()?;
         let decoder = wic.CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand).ok()?;
         let frame = decoder.GetFrame(0).ok()?;
         let (mut w, mut h) = (0u32, 0u32);
@@ -612,6 +656,37 @@ mod tests {
         assert_eq!(super::clean_artist("Dr. Dre \u{2014} 2001", ""), "Dr. Dre");
         assert_eq!(super::clean_artist("Daft Punk", "Discovery"), "Daft Punk");
         assert_eq!(super::clean_artist("A - B", "B"), "A");
+    }
+
+    // Art bug: Apple Music sends a new cover after the title; its "properties changed"
+    // signal must make the reader fetch the art again instead of reusing the cached one.
+    #[test]
+    fn properties_signal_refetches_art_but_progress_does_not() {
+        use super::*;
+        unsafe {
+            let _ = RoInitialize(RO_INIT_MULTITHREADED);
+            let (tx, _rx) = channel();
+            let Ok(mut r) = Reader::new(tx) else { return }; // no media controls on this PC
+            let art = || Arc::new(Art { key: 7, big: vec![], big_size: 0, small: vec![], small_size: 0, accent: [0.0; 3] });
+            r.art_cache.insert(7, Cached { art: art(), size: 1, at: Instant::now() });
+            assert!(r.handle(Msg::Changed), "progress or play/pause still refreshes");
+            assert!(r.art_cache.contains_key(&7), "...but keeps the decoded art");
+            assert!(r.handle(Msg::PropsChanged));
+            assert!(r.art_cache.is_empty(), "new song details: decode the cover again");
+        }
+    }
+
+    // Art bug, part 2: just after Apple Music opens, its first song gets a placeholder cover
+    // that is later swapped for the real one without any signal.
+    #[test]
+    fn swapped_cover_is_reloaded_only_while_young() {
+        use super::cover_swapped;
+        use std::time::Duration;
+        let young = Duration::from_secs(5);
+        assert!(cover_swapped(1_200, Some(658_552), young), "placeholder replaced: reload");
+        assert!(!cover_swapped(658_552, Some(658_552), young), "same cover: keep it");
+        assert!(!cover_swapped(1_200, None, young), "couldn't read the size: keep what we have");
+        assert!(!cover_swapped(1_200, Some(658_552), Duration::from_secs(31)), "older than 30 s: stop checking");
     }
 
     // Bug hunt B3: a plain .exe keeps the underscores in its name.

@@ -74,7 +74,9 @@ Cargo.toml, Cargo.lock       Rust project and exact dependency versions
 build.rs                     puts assets/icon.ico into the exe (no extra tools)
 assets/icon.ico              the app and tray icon
 src/
-  main.rs        the notch window, closed and Home views, mouse/keyboard handling
+  main.rs        the app's state, sizes, animation and drawing order; mouse/keyboard handling
+  window.rs      startup, the message loop, staying on top, full-screen detection
+  home.rs        the closed notch and Home view: clock, now playing, privacy dots, volume pill
   pages.rs       the open card's pages (Controls, Music, Shelf, Network, System) and paging
   settings_card.rs  the Settings card and its tabs
   shadow.rs      the notch's soft shadow
