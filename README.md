@@ -70,7 +70,6 @@ cargo run --release     # builds it and starts it
 ```
 release/Dynamic Island.exe   the ready-to-run app
 CHANGELOG.md                 what's new in each version
-TEST_LOG.md                  every test and on-screen check for R1.01
 Cargo.toml, Cargo.lock       Rust project and exact dependency versions
 build.rs                     puts assets/icon.ico into the exe (no extra tools)
 assets/icon.ico              the app and tray icon

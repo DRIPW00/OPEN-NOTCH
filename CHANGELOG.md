@@ -13,7 +13,7 @@
 - **The thin bar** is now only for maximised apps; full screen hides the notch instead. Always show keeps it full size in both cases.
 
 ### Under the hood
-- 48 automatic tests. See TEST_LOG.md.
+- 50 automatic tests.
 ## R1.01
 
 ### New
@@ -49,5 +49,5 @@
 ### Under the hood
 - No new dependencies. The exe is 0.77 MB, including the icon.
 - Removed unused code: debug-only printouts, about 110 lines of tray-icon drawing (it now uses the app icon), and 9 redundant Windows features in Cargo.toml.
-- 43 automatic tests (8 in R1.00). See TEST_LOG.md for every test and on-screen check.
+- 43 automatic tests (8 in R1.00).
 - Privacy: still no internet connections. The only new thing written outside the app's settings file is the Windows startup entry, and only while Launch at startup is on.
