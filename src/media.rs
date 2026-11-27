@@ -52,7 +52,7 @@ pub struct Art {
     pub big_size: u32,
     pub small: Vec<u8>,
     pub small_size: u32,
-    /// A bright colour taken from the artwork (for the equalizer), RGB 0..1.
+    /// A bright colour taken from the artwork (for the waveform), RGB 0..1.
     pub accent: [f32; 3],
 }
 

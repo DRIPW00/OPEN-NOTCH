@@ -9,10 +9,10 @@
 // - Idle (nothing playing): the time and a battery ring, plus a green camera / orange mic
 //   dot while an app uses them. Hovered: big time, the day (red) and date, the battery %.
 // - Now Playing: media.rs reads every app's media session (Apple Music, Spotify, browsers...).
-//   Closed, the notch shows the album art and a live equalizer; hovered, it opens into a card
+//   Closed, the notch shows the album art and a live waveform; hovered, it opens into a card
 //   with source tabs, the song, a seek bar and controls.
 // - While the notch moves we draw one frame per refresh of its monitor (60/120/144/240 Hz...).
-//   While music plays we redraw the equalizer at 30 fps (closed) or the progress bar at 4 fps
+//   While music plays we redraw the waveform at 30 fps (closed) or the progress bar at 4 fps
 //   (open). Otherwise nothing is drawn and the app just waits (~0% CPU).
 // - Stays above other always-on-top windows (re-asserted when the active app changes).
 // - Controls (a third page): volume and brightness sliders, the audio output and input
@@ -97,7 +97,7 @@ const TAB_GENERAL: usize = 0;
 const TAB_MOTION: usize = 1;
 const TAB_PAGES: usize = 2;
 /// Shown under About in Settings.
-const ABOUT_VERSION: &str = "R1.01";
+const ABOUT_VERSION: &str = "R1.02";
 const ABOUT_AUTHOR: &str = "DRIPWOO";
 /// The notch while files are dragged over it (the drop zone).
 const DROP: (f32, f32) = (CARD_W, 140.0);
@@ -126,7 +126,7 @@ const BEZIER_CIRCLE: f32 = 0.552_284_8; // makes cubic curves trace a true quart
 
 // Defined in the large Win32_UI_Controls module; declared here to keep the build lean.
 const WM_MOUSELEAVE: u32 = 0x02A3;
-/// Redraw timer for the equalizer / progress bar while music plays.
+/// Redraw timer for the waveform / progress bar while music plays.
 const TICK_TIMER: usize = 1;
 /// Clears a short notice in the card.
 const NOTICE_TIMER: usize = 2;
@@ -328,6 +328,10 @@ struct App {
     hud_kind: Hud,
     /// 0 = clock, 1 = slider (crossfade).
     hud_mix: Spring,
+    /// Closed notch: 0 = clock, 1 = now playing (album art + waveform), while music plays.
+    music_mix: Spring,
+    /// Music is playing or paused (keeps the notch out of the thin bar).
+    music: bool,
     /// The pointer left the open notch; it closes when LEAVE_TIMER fires unless it returns.
     leaving: bool,
     /// Windows is watching for the pointer leaving (TrackMouseEvent is armed).
@@ -340,6 +344,8 @@ struct App {
     pinned: bool,
     /// A full-screen or maximised app is in front: shrink to a thin bar.
     covered: bool,
+    /// A full-screen app is in front: the notch is hidden, its drawing surfaces freed.
+    fullscreen: bool,
     /// When the pointer arrived on the bar (it opens after the hover delay).
     dwell_since: Option<Instant>,
     /// The window lets clicks through (bar mode).
@@ -480,31 +486,51 @@ unsafe extern "system" fn on_window_changed(
 
 /// Is the active window full screen or maximised on the notch's monitor?
 /// (The desktop and taskbar don't count.)
-unsafe fn app_covers_screen(notch: HWND) -> bool {
+unsafe fn app_covers_screen(notch: HWND) -> Cover {
     let fg = GetForegroundWindow();
     if fg.is_invalid() || fg == notch || !IsWindowVisible(fg).as_bool() || IsIconic(fg).as_bool() {
-        return false;
+        return Cover::None;
     }
     let mut class = [0u16; 64];
     let len = GetClassNameW(fg, &mut class).max(0) as usize;
     let class = String::from_utf16_lossy(&class[..len]);
     if matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd") {
-        return false;
+        return Cover::None;
     }
     let monitor = MonitorFromWindow(notch, MONITOR_DEFAULTTOPRIMARY);
     if MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST) != monitor {
-        return false;
-    }
-    if IsZoomed(fg).as_bool() {
-        return true;
+        return Cover::None;
     }
     let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
     let mut r = RECT::default();
     if !GetMonitorInfoW(monitor, &mut info).as_bool() || GetWindowRect(fg, &mut r).is_err() {
-        return false;
+        return Cover::None;
     }
-    let m = info.rcMonitor;
-    r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+    let caption = GetWindowLongW(fg, GWL_STYLE) as u32 & WS_CAPTION.0 == WS_CAPTION.0;
+    cover_kind(r, info.rcMonitor, IsZoomed(fg).as_bool(), caption)
+}
+
+/// What the window in front does to the notch's screen.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Cover {
+    None,
+    /// Maximised: the taskbar still shows. The notch shrinks to the thin bar.
+    Maximized,
+    /// Full screen (a game, a video, F11): covers the whole monitor. The notch hides.
+    FullScreen,
+}
+
+/// Full screen = covers the whole monitor and isn't an ordinary maximised window (one
+/// with a title bar can cover it all when the taskbar auto-hides).
+fn cover_kind(window: RECT, monitor: RECT, zoomed: bool, caption: bool) -> Cover {
+    let covers = window.left <= monitor.left && window.top <= monitor.top && window.right >= monitor.right && window.bottom >= monitor.bottom;
+    if covers && !(zoomed && caption) {
+        Cover::FullScreen
+    } else if zoomed || covers {
+        Cover::Maximized
+    } else {
+        Cover::None
+    }
 }
 
 fn main() -> Result<()> {
@@ -802,6 +828,14 @@ impl Outline {
     }
 }
 
+/// The complementary error function, to within 1.5e-7 (Abramowitz & Stegun 7.1.26).
+fn erfc(x: f32) -> f32 {
+    let t = 1.0 / (1.0 + 0.327_591_1 * x.abs());
+    let poly = t * (0.254_829_6 + t * (-0.284_496_7 + t * (1.421_413_7 + t * (-1.453_152_1 + t * 1.061_405_4))));
+    let e = poly * (-x * x).exp();
+    if x >= 0.0 { e } else { 2.0 - e }
+}
+
 fn length(x: f32, y: f32) -> f32 {
     (x * x + y * y).sqrt()
 }
@@ -814,13 +848,12 @@ struct ShadowLook {
 }
 
 impl ShadowLook {
-    /// The shader: opacity at `d` pixels outside the edge. A Gaussian falloff: darkest at
-    /// the edge, smooth all the way out, and gone (under 1/255) by about 3 sigma.
+    /// The shader: opacity at `d` pixels outside the (shifted) outline. The notch's shape
+    /// blurred by a Gaussian of width `sigma`, as a real soft shadow (and CSS box-shadow):
+    /// half strength right at the edge, so the notch's own edge stays crisp, smoothly
+    /// darker underneath and lighter outside, gone (under 1/255) by about 3 sigma.
     fn alpha(&self, d: f32) -> f32 {
-        if d <= 0.0 {
-            return self.peak;
-        }
-        self.peak * (-0.5 * (d / self.sigma).powi(2)).exp()
+        self.peak * 0.5 * erfc(d / (self.sigma * std::f32::consts::SQRT_2))
     }
 
     /// How far from the edge the shadow can show.
@@ -840,28 +873,32 @@ fn paint_shadow(pixels: &mut [u32], width: usize, height: usize, notch: &Outline
     }
     const INSIDE: f32 = 2.0; // a little under the notch's anti-aliased rim, so no gap shows
     let reach = look.reach();
-    let x0 = (notch.cx - notch.w / 2.0 - reach).floor().max(0.0) as usize;
-    let x1 = ((notch.cx + notch.w / 2.0 + reach).ceil() as usize).min(width);
+    let side = notch.w / 2.0 + notch.shoulder + reach; // the flare tips stick out past the sides
+    let x0 = (notch.cx - side).floor().max(0.0) as usize;
+    let x1 = ((notch.cx + side).ceil() as usize).min(width);
     let y1 = ((notch.h + reach).ceil() as usize).min(height);
     // Columns well inside the notch, skipped on the rows above its bottom corners.
     let skip0 = (notch.cx - notch.w / 2.0 + INSIDE).ceil().max(0.0) as usize;
     let skip1 = (notch.cx + notch.w / 2.0 - INSIDE).floor().max(0.0) as usize;
     for y in 0..y1 {
-        let fy = y as f32 + 0.5 - look.drop;
-        // Lit from above: nothing at the screen edge itself, fading in smoothly down the
-        // flared top corners.
-        let fade = (fy / (notch.shoulder + 2.0 * look.sigma)).clamp(0.0, 1.0);
-        let fade = fade * fade * (3.0 - 2.0 * fade);
-        let straight = fy < notch.h - notch.r;
+        // Shadow all the way up to the screen edge, so the flared top corners have it too.
+        // The downward shift eases to nothing at the top: shifted there, the shadow pulled
+        // away from the flare's curve and pooled past its tip.
+        let ease = ((y as f32 + 0.5) / (notch.shoulder + 2.0 * look.sigma)).clamp(0.0, 1.0);
+        let drop = look.drop * ease * ease * (3.0 - 2.0 * ease);
+        let fy = y as f32 + 0.5 - drop;
+        let straight = (y as f32 + 0.5) < notch.h - notch.r; // above the real bottom corners
         let mut x = x0;
         while x < x1 {
             if straight && x >= skip0 && x < skip1 {
                 x = skip1;
                 continue;
             }
+            // d is measured from the outline shifted down by `drop`: a pixel just inside the
+            // real bottom edge is `drop` further in, so allow for it (or the rim shows through).
             let d = notch.distance(x as f32 + 0.5, fy);
-            if d > -INSIDE && fade > 0.0 {
-                let a = look.alpha(d) * fade * 255.0 + dither(x, y);
+            if d > -(INSIDE + drop) {
+                let a = look.alpha(d) * 255.0 + dither(x, y);
                 pixels[y * width + x] = (a.clamp(0.0, 255.0) as u32) << 24;
             }
             x += 1;
@@ -876,6 +913,21 @@ fn dither(x: usize, y: usize) -> f32 {
     n = n.wrapping_mul(0x2C1B_3C6D);
     n ^= n >> 12;
     (n & 0xFFFF) as f32 / 65536.0
+}
+
+/// Bars in the closed now-playing waveform.
+const WAVE_BARS: usize = 6;
+
+/// Height of waveform bar `i` (0–1 of its full height) at `time` seconds: taller in the
+/// middle, each bar moving at its own pace; low and still when paused.
+fn wave_level(i: usize, time: f32, playing: bool) -> f32 {
+    const ENVELOPE: [f32; WAVE_BARS] = [0.45, 0.75, 1.0, 0.85, 0.6, 0.4];
+    const SPEEDS: [f32; WAVE_BARS] = [6.1, 8.3, 7.2, 9.4, 6.8, 7.9];
+    const PHASES: [f32; WAVE_BARS] = [0.0, 2.1, 0.9, 3.3, 1.6, 2.7];
+    if !playing {
+        return 0.15;
+    }
+    ENVELOPE[i] * (0.35 + 0.65 * (0.5 + 0.5 * (time * SPEEDS[i] + PHASES[i]).sin()).powf(1.3))
 }
 
 /// Where page `i` sits relative to the slide position `pos`, in pages, with the pages in a
@@ -980,12 +1032,15 @@ impl App {
             hud: None,
             hud_kind: Hud::Volume,
             hud_mix: Spring::new(0.0),
+            music_mix: Spring::new(0.0),
+            music: false,
             leaving: false,
             tracking: false,
             hover_pending: false,
             delay_edit: None,
             pinned: false,
             covered: false,
+            fullscreen: false,
             dwell_since: None,
             click_through: false,
             wifi: wifi::Wifi::start(hwnd),
@@ -1169,10 +1224,25 @@ impl App {
         let _ = self.render();
     }
 
-    /// Redraw on a timer while music plays: equalizer when closed, progress bar when open.
+    /// Redraw on a timer while music plays: waveform when closed, progress bar when open.
     unsafe fn update_ticker(&mut self) {
         let playing = self.current().is_some_and(|s| s.status == Status::Playing);
-        // ~30 fps while music plays: the equalizer is visible closed and on every open page
+        // The closed notch cross-fades between the clock and now playing; paused music stays.
+        let loaded = self.current().is_some_and(|s| s.status != Status::Stopped);
+        let mix = if loaded { 1.0 } else { 0.0 };
+        // Music playing or paused: never the thin bar (re-checked when that changes).
+        if loaded != self.music {
+            self.music = loaded;
+            if self.covered && !self.hovered {
+                self.set_bar_mode(true);
+                self.set_expanded(false); // music set first, so this doesn't loop back here
+            }
+        }
+        if self.music_mix.target != mix {
+            self.music_mix.set_target(mix, spring::ROW);
+            self.start_animation();
+        }
+        // ~30 fps while music plays: the waveform is visible closed and on every open page
         // (the progress bar rides along).
         let ms = if playing { 33 } else { 0 };
         if ms != self.tick_ms {
@@ -1190,7 +1260,7 @@ impl App {
     fn closed_size(&self) -> (f32, f32) {
         if self.hud.is_some() {
             HUD
-        } else if self.covered && !self.prefs.always_show {
+        } else if self.covered && !self.prefs.always_show && !self.music {
             BAR
         } else if !self.shelf.is_empty() {
             (CLOSED.0 + SHELF_CLOSED_EXTRA, CLOSED.1)
@@ -1295,6 +1365,9 @@ impl App {
 
     /// Draw the notch and push the pixels to the screen.
     unsafe fn render(&mut self) -> Result<()> {
+        if self.fullscreen {
+            return Ok(()); // hidden behind a full-screen app, nothing to draw into
+        }
         self.render_shadow();
         let rect_px = RECT { left: 0, top: 0, right: self.px_w, bottom: self.px_h };
         self.target.BindDC(self.mem_dc, &rect_px)?;
@@ -1375,7 +1448,7 @@ impl App {
     }
 
     /// The soft shadow under the notch, drawn into the click-through shadow window. Only
-    /// redrawn when the notch's size changes (not for every equalizer frame).
+    /// redrawn when the notch's size changes (not for every waveform frame).
     unsafe fn render_shadow(&mut self) {
         if self.shadow_hwnd.is_invalid() {
             return;
@@ -1404,9 +1477,9 @@ impl App {
             shoulder: (SHOULDER * s).min(self.height.value * s / 2.0),
         };
         let look = ShadowLook {
-            sigma: (1.4 + 0.8 * open) * s,
-            peak: (0.36 + 0.12 * open) * strength,
-            drop: (0.4 + 0.8 * open) * s,
+            sigma: (3.0 + 1.5 * open) * s,
+            peak: (0.62 + 0.08 * open) * strength,
+            drop: (1.0 + 1.5 * open) * s,
         };
         paint_shadow(pixels, width, height, &notch, &look);
         let size = SIZE { cx: self.px_w, cy: self.px_h };
@@ -1506,7 +1579,36 @@ impl App {
 
     /// Closed, nothing playing (design 6A): "9:41 THU 26" on the left; camera/mic dots and
     /// the battery ring on the right.
+    /// Closed, no slider showing: the clock, or (while music plays) now playing, cross-faded.
     unsafe fn draw_idle_closed(&self, t: &ID2D1RenderTarget, brush: &ID2D1Brush, alpha: f32) {
+        let mix = self.music_mix.value.clamp(0.0, 1.0);
+        if mix < 0.999 {
+            self.draw_clock_closed(t, brush, alpha * (1.0 - mix));
+        }
+        if mix > 0.001 {
+            self.draw_now_playing_closed(t, brush, alpha * mix);
+        }
+    }
+
+    /// Closed while music plays, as the iPhone: album art on the left, a waveform in the
+    /// album's colour on the right (camera/mic dots stay, just left of it).
+    unsafe fn draw_now_playing_closed(&self, t: &ID2D1RenderTarget, brush: &ID2D1Brush, alpha: f32) {
+        let Some(session) = self.current() else { return };
+        let s = self.dpi_scale;
+        let w = self.width.value * s;
+        let cx = self.px_w as f32 / 2.0;
+        let (left, right) = (cx - w / 2.0, cx + w / 2.0);
+        let h = 32.0 * s;
+        let size = 22.0 * s;
+        self.draw_art(t, brush, session, left + 12.0 * s, (h - size) / 2.0, size, 6.0 * s, alpha, false);
+        let wave_right = right - 14.0 * s;
+        self.draw_waveform(t, brush, wave_right, h / 2.0, 2.5 * s, 2.0 * s, 16.0 * s, alpha);
+        let wave_w = WAVE_BARS as f32 * 4.5 * s;
+        self.draw_privacy_dots(t, brush, wave_right - wave_w - 8.0 * s, h / 2.0, alpha);
+    }
+
+    /// Closed, nothing loaded: [time] [day] [shelf files] … [dots][battery].
+    unsafe fn draw_clock_closed(&self, t: &ID2D1RenderTarget, brush: &ID2D1Brush, alpha: f32) {
         let s = self.dpi_scale;
         let w = self.width.value * s;
         let cx = self.px_w as f32 / 2.0;
@@ -1549,41 +1651,32 @@ impl App {
             dots_right = ring_cx - r - 10.0 * s;
         }
         self.draw_privacy_dots(t, brush, dots_right, h / 2.0, alpha);
-
-        // Music loaded: a small equalizer, left of the camera/mic dots.
-        let dots = self.privacy_colours().len() as f32;
-        let eq_right = dots_right - dots * 11.0 * s - if dots > 0.0 { 6.0 * s } else { 0.0 };
-        self.draw_equalizer(t, brush, eq_right, h / 2.0, 2.5 * s, 2.0 * s, 12.0 * s, alpha);
     }
 
-    /// The equalizer inside the open card: grows from the closed notch's size to full size
+    /// The waveform inside the open card: grows from the closed notch's size to full size
     /// as the notch opens. `right`/`cy` in pixels.
-    unsafe fn draw_open_equalizer(&self, t: &ID2D1RenderTarget, brush: &ID2D1Brush, right: f32, cy: f32, alpha: f32) {
+    unsafe fn draw_open_waveform(&self, t: &ID2D1RenderTarget, brush: &ID2D1Brush, right: f32, cy: f32, alpha: f32) {
         let s = self.dpi_scale;
         let o = self.openness().clamp(0.0, 1.0);
         let lerp = |a: f32, b: f32| (a + (b - a) * o) * s;
-        self.draw_equalizer(t, brush, right, cy, lerp(2.5, 3.5), lerp(2.0, 3.0), lerp(12.0, 20.0), alpha);
+        self.draw_waveform(t, brush, right, cy, lerp(2.5, 3.0), lerp(2.0, 2.5), lerp(16.0, 20.0), alpha);
     }
 
-    /// Three bars in the album's colour, right edge at `right`: bouncing while playing,
-    /// flat (small dots) while paused, hidden when nothing is loaded.
+    /// The waveform (as the iPhone's): WAVE_BARS bars in the album's colour, centred on
+    /// `cy`, right edge at `right`. Moving while playing, low and still while paused, hidden
+    /// when nothing is loaded.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn draw_equalizer(&self, t: &ID2D1RenderTarget, brush: &ID2D1Brush, right: f32, cy: f32, bar_w: f32, gap: f32, max_h: f32, alpha: f32) {
+    unsafe fn draw_waveform(&self, t: &ID2D1RenderTarget, brush: &ID2D1Brush, right: f32, cy: f32, bar_w: f32, gap: f32, max_h: f32, alpha: f32) {
         let Some(session) = self.current().filter(|s| s.status != Status::Stopped) else { return };
-        let playing = session.status == Status::Playing;
         let accent = session.art.as_ref().map(|a| a.accent).unwrap_or([0.95, 0.65, 0.25]);
         self.brush.SetColor(&D2D1_COLOR_F { r: accent[0], g: accent[1], b: accent[2], a: 1.0 });
         self.brush.SetOpacity(alpha);
         let time = self.started.elapsed().as_secs_f32();
-        let bottom = cy + max_h / 2.0;
-        let speeds = [7.3, 9.1, 6.2];
-        let phases = [0.0, 1.7, 3.1];
-        for i in 0..3 {
-            // Each bar bounces at its own speed; looks like a live equalizer.
-            let level = if playing { 0.3 + 0.7 * (0.5 + 0.5 * (time * speeds[i] + phases[i]).sin()).powf(1.4) } else { 0.0 };
-            let bar_h = (max_h * level).max(bar_w);
-            let x = right - (3 - i) as f32 * (bar_w + gap) + gap;
-            let r = D2D1_ROUNDED_RECT { rect: rect(x, bottom - bar_h, x + bar_w, bottom), radiusX: bar_w / 2.0, radiusY: bar_w / 2.0 };
+        let playing = session.status == Status::Playing;
+        for i in 0..WAVE_BARS {
+            let bar_h = (max_h * wave_level(i, time, playing)).max(bar_w);
+            let x = right - (WAVE_BARS - i) as f32 * (bar_w + gap) + gap;
+            let r = D2D1_ROUNDED_RECT { rect: rect(x, cy - bar_h / 2.0, x + bar_w, cy + bar_h / 2.0), radiusX: bar_w / 2.0, radiusY: bar_w / 2.0 };
             t.FillRoundedRectangle(&r, brush);
         }
     }
@@ -1683,19 +1776,19 @@ impl App {
             set(0x98989F, 1.0);
             self.gfx.text(t, &status, &self.gfx.fonts.battery_status, rect(at(text_right - 110.0), y(mid + 4.0), at(text_right), y(mid + 18.0)), brush);
 
-            // Equalizer just left of the battery text.
+            // Waveform just left of the battery text.
             let text_w = (self.gfx.measure(&format!("{}%", b.percent), &self.gfx.fonts.battery_big)
                 .max(self.gfx.measure(&status, &self.gfx.fonts.battery_status)))
                 / s;
-            self.draw_open_equalizer(t, brush, at(text_right - text_w - 16.0), y(mid), alpha);
+            self.draw_open_waveform(t, brush, at(text_right - text_w - 16.0), y(mid), alpha);
         } else {
-            // No battery (desktop PC): the equalizer takes the battery's place.
-            self.draw_open_equalizer(t, brush, at(OPEN_IDLE.0 - 24.0), y(mid), alpha);
+            // No battery (desktop PC): the waveform takes the battery's place.
+            self.draw_open_waveform(t, brush, at(OPEN_IDLE.0 - 24.0), y(mid), alpha);
         }
         hits
     }
 
-    /// Closed: always the Home view, with a small equalizer while music plays.
+    /// Closed: always the Home view, with now playing while music is loaded.
     /// After a volume/brightness key press the clock crossfades into a slider for a moment.
     unsafe fn draw_closed(&self, t: &ID2D1RenderTarget, brush: &ID2D1Brush, alpha: f32) {
         let mix = self.hud_mix.value.clamp(0.0, 1.0);
@@ -2063,9 +2156,9 @@ impl App {
 
         // ---- Art, title, artist
         self.draw_art(t, brush, &session, at(0.0), y(52.0), y(68.0), y(14.0), alpha, true);
-        // Equalizer on the right, above the end of the progress bar; text stops short of it.
-        self.draw_open_equalizer(t, brush, at(w_box), y(86.0), alpha);
-        let text_right = w_box - 36.0;
+        // Waveform on the right, above the end of the progress bar; text stops short of it.
+        self.draw_open_waveform(t, brush, at(w_box), y(86.0), alpha);
+        let text_right = w_box - 40.0;
         set(0xFFFFFF, 1.0);
         self.gfx.text(t, &session.title, &self.gfx.fonts.title, rect(at(84.0), y(54.0), at(text_right), y(76.0)), brush);
         match &self.notice {
@@ -2992,6 +3085,7 @@ impl App {
         self.page_pos.step(dt);
         self.bubble.step(dt);
         self.hud_mix.step(dt);
+        self.music_mix.step(dt);
         self.drop_mix.step(dt);
         for (_, row) in self.row_y.iter_mut() {
             row.step(dt);
@@ -3003,6 +3097,7 @@ impl App {
             && self.page_pos.is_settled()
             && self.bubble.is_settled()
             && self.hud_mix.is_settled()
+            && self.music_mix.is_settled()
             && self.drop_mix.is_settled()
             && self.row_y.iter().all(|(_, r)| r.is_settled())
         {
@@ -3118,6 +3213,7 @@ impl App {
                 self.prefs.always_show = !self.prefs.always_show;
                 self.prefs.save();
                 self.set_bar_mode(self.covered && !self.hovered);
+                self.check_covered();
                 return self.redraw();
             }
             Action::Speed(k) => {
@@ -3462,7 +3558,7 @@ impl App {
     unsafe fn set_bar_mode(&mut self, on: bool) {
         // Always show: never the thin bar. Click to open: the bar takes clicks (and hovers,
         // through the normal mouse path), so it isn't see-through to the mouse.
-        let on = on && !self.prefs.always_show && !self.prefs.click_opens();
+        let on = on && !self.prefs.always_show && !self.prefs.click_opens() && !self.fullscreen && !self.music;
         self.dwell_since = None;
         if on == self.click_through {
             return;
@@ -3759,8 +3855,48 @@ impl App {
 
     /// Is a full-screen or maximised app in front, on the notch's monitor? If that changed,
     /// shrink to the thin bar (or grow back).
+    /// A full-screen app came to the front (or left): hide the notch and its shadow, and
+    /// free their screen-sized pixel buffers while hidden; bring them back after.
+    unsafe fn set_fullscreen(&mut self, full: bool) {
+        self.fullscreen = full;
+        if full {
+            self.pinned = false;
+            self.close_card();
+            self.hide_hud();
+            self.set_bar_mode(false);
+            let _ = ShowWindow(self.shadow_hwnd, SW_HIDE);
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+            self.free_surfaces();
+        } else {
+            let _ = self.resize_surface(); // fails only if Windows is out of memory
+            let _ = ShowWindow(self.shadow_hwnd, SW_SHOWNOACTIVATE);
+            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            stay_on_top(self.hwnd);
+            self.redraw();
+        }
+    }
+
+    /// Swap both big pixel buffers for 1×1 ones (a DC must always hold a bitmap).
+    unsafe fn free_surfaces(&mut self) {
+        for (dc, bitmap) in [(self.mem_dc, &mut self.bitmap), (self.shadow_dc, &mut self.shadow_bitmap)] {
+            let tiny = CreateCompatibleBitmap(dc, 1, 1);
+            SelectObject(dc, tiny.into());
+            if !bitmap.is_invalid() {
+                let _ = DeleteObject((*bitmap).into());
+            }
+            *bitmap = tiny;
+        }
+        self.shadow_bits = std::ptr::null_mut();
+        self.shadow_key = (-1, -1);
+    }
+
     unsafe fn check_covered(&mut self) {
-        let covered = app_covers_screen(self.hwnd);
+        let cover = app_covers_screen(self.hwnd);
+        let full = cover == Cover::FullScreen && !self.prefs.always_show;
+        if full != self.fullscreen {
+            self.set_fullscreen(full);
+        }
+        let covered = cover != Cover::None;
         if covered != self.covered {
             self.covered = covered;
             if !self.hovered {
@@ -4374,7 +4510,7 @@ mod tests {
 
     #[test]
     fn shadow_is_thin_smooth_and_hugs_the_edge() {
-        for sigma in [1.6, 2.8, 3.5] {
+        for sigma in [3.0, 4.5] {
             let look = ShadowLook { sigma, peak: 0.5, drop: 1.0 };
             let mut last = look.alpha(0.0);
             for tenth in 1..300 {
@@ -4385,7 +4521,7 @@ mod tests {
             }
             // Gone (under one 8-bit step) within ~3.5 sigma of the edge: a few pixels.
             assert!(look.alpha(look.reach() - look.drop) * 255.0 < 0.5);
-            assert!(look.reach() < 14.0, "stays close to the edge ({})", look.reach());
+            assert!(look.reach() < 18.0, "stays close to the edge ({})", look.reach());
         }
     }
 
@@ -4486,23 +4622,143 @@ mod tests {
 
     #[test]
     fn shadow_wraps_the_flare_smoothly() {
-        // Rework after on-screen review: the shadow must run round the flared top corners
-        // with no hard start (an earlier version began abruptly part-way down the side) and
-        // no crease out to the side; nothing at the screen edge itself.
+        // The shadow must run round the flared top corners right up to the screen edge (the
+        // flares were bare before), with no jumps down the side and no crease out to the side.
         let n = sample_notch();
         let look = ShadowLook { sigma: 2.5, peak: 0.45, drop: 1.0 };
         let (w, h) = (800usize, 300usize);
         let mut px = vec![0u32; w * h];
         paint_shadow(&mut px, w, h, &n, &look);
         let a = |x: usize, y: usize| (px[y * w + x] >> 24) as i32;
-        assert!((0..w).all(|x| a(x, 0) <= 1), "nothing on the screen edge row");
-        // Just outside the side, top to bottom: rises gently, no jumps.
-        let side = 552;
-        let column: Vec<i32> = (0..80).map(|y| a(side, y)).collect();
+        assert!(a(561, 0) > 0, "shadow at the flare's tip, on the screen edge row");
+        // Just outside the side, top to bottom: no jumps.
+        let side = 550; // pixel centre half a pixel outside the right side
+        let column: Vec<i32> = (3..80).map(|y| a(side, y)).collect(); // rows 0-2: under the flare
         assert!(column.windows(2).all(|p| (p[1] - p[0]).abs() <= 12), "{column:?}");
-        assert!(column[60] >= (0.45 * 255.0 * 0.6) as i32, "full shadow down the side");
+        let want = (look.alpha(0.5) * 255.0) as i32;
+        assert!((column[57] - want).abs() <= 1, "full shadow down the side: {} vs {want}", column[57]);
         // Out to the side at the flare's height: fades away, no crease.
         let row: Vec<i32> = (550..590).map(|x| a(x, 10)).collect();
         assert!(row.windows(2).all(|p| p[1] <= p[0] + 2), "only fades going out: {row:?}");
+    }
+
+    // Full screen hides the notch; maximised keeps the thin bar.
+    #[test]
+    fn full_screen_and_maximised_are_told_apart() {
+        let monitor = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let r = |left, top, right, bottom| RECT { left, top, right, bottom };
+        // A game or video full screen, or a browser with F11 (often a few px beyond).
+        assert_eq!(cover_kind(monitor, monitor, false, false), Cover::FullScreen);
+        assert_eq!(cover_kind(r(-8, -8, 1928, 1088), monitor, false, true), Cover::FullScreen);
+        // Maximised, taskbar showing: the bar, not hidden.
+        assert_eq!(cover_kind(r(-8, -8, 1928, 1040), monitor, true, true), Cover::Maximized);
+        // Maximised with an auto-hiding taskbar covers it all, but is still just maximised.
+        assert_eq!(cover_kind(r(-8, -8, 1928, 1088), monitor, true, true), Cover::Maximized);
+        // A borderless window that Windows calls maximised and covers it all: full screen.
+        assert_eq!(cover_kind(monitor, monitor, true, false), Cover::FullScreen);
+        // An ordinary window.
+        assert_eq!(cover_kind(r(100, 100, 900, 700), monitor, false, true), Cover::None);
+        // A second monitor's coordinates.
+        let second = RECT { left: 1920, top: 0, right: 4480, bottom: 1440 };
+        assert_eq!(cover_kind(second, second, false, false), Cover::FullScreen);
+    }
+
+    #[test]
+    fn notch_edge_stays_crisp() {
+        // On-screen review: the darkest shadow sat right against the edge and blurred the
+        // rounded corners. Now the shadow is the notch's shape blurred (as CSS box-shadow):
+        // half strength at the edge, darker underneath, lighter outside.
+        let look = ShadowLook { sigma: 2.5, peak: 0.6, drop: 0.0 };
+        assert!((look.alpha(0.0) - 0.3).abs() < 1e-3);
+        assert!(look.alpha(-10.0) > 0.59 && look.alpha(10.0) < 0.001);
+        assert!((look.alpha(1.0) + look.alpha(-1.0) - 0.6).abs() < 1e-3, "symmetric about the edge");
+    }
+
+    #[test]
+    fn no_light_gap_under_the_bottom_edge() {
+        // Found in the renders: with the shadow shifted down by more than 2 px, the pixels on
+        // the notch's own bottom edge were skipped and the background showed through its
+        // anti-aliased rim as a bright line. Every rim pixel must be shaded.
+        let n = sample_notch();
+        for drop in [0.0, 1.0, 2.75, 4.0] {
+            let look = ShadowLook { sigma: 2.0, peak: 0.6, drop };
+            let (w, h) = (800usize, 300usize);
+            let mut px = vec![0u32; w * h];
+            paint_shadow(&mut px, w, h, &n, &look);
+            for y in [198usize, 199] {
+                let a = px[y * w + 400] >> 24;
+                assert!(a as f32 >= look.alpha(0.0) * 255.0 - 1.0, "drop {drop}: rim row {y} = {a}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_edge_has_shadow() {
+        // On-screen review: too thin, and the flared top corners were bare. Every pixel just
+        // outside the outline (sides, round bottom corners, flares up to the screen edge)
+        // must get a clear share of the shadow.
+        let n = sample_notch();
+        let look = ShadowLook { sigma: 3.0, peak: 0.62, drop: 1.0 };
+        let (w, h) = (800usize, 300usize);
+        let mut px = vec![0u32; w * h];
+        paint_shadow(&mut px, w, h, &n, &look);
+        let mut checked = 0;
+        for y in 0..h {
+            for x in 0..w {
+                let d = n.distance(x as f32 + 0.5, y as f32 + 0.5);
+                if d > 0.25 && d <= 1.25 {
+                    let a = (px[y * w + x] >> 24) as f32;
+                    assert!(a >= 0.25 * look.peak * 255.0, "bare edge at ({x}, {y}): {a}");
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 600, "walked the whole outline ({checked})");
+    }
+
+    #[test]
+    fn flare_shadow_is_even_up_to_the_screen_edge() {
+        // On-screen review: shifted down, the shadow pulled away from the flare's curve near
+        // the top and pooled into a lump past its tip. Just outside the curve it must match
+        // the straight side's shade all the way up.
+        let n = sample_notch(); // right side at x 550, flare centre (560, 10), radius 10
+        let look = ShadowLook { sigma: 3.0, peak: 0.62, drop: 2.5 };
+        let (w, h) = (800usize, 300usize);
+        let mut px = vec![0u32; w * h];
+        paint_shadow(&mut px, w, h, &n, &look);
+        let a = |x: f32, y: f32| (px[y as usize * w + x as usize] >> 24) as f32;
+        let side = a(551.0, 60.0);
+        for deg in (180..=265).step_by(5) {
+            let t = (deg as f32).to_radians();
+            let (x, y) = (560.0 + 8.8 * t.cos(), 10.0 + 8.8 * t.sin());
+            let v = a(x, y);
+            // A concave curve catches a little more shadow than a straight side, but no lump.
+            assert!(v >= side * 0.8 && v <= side * 1.6, "{deg}°: {v} vs side {side}");
+        }
+    }
+
+    #[test]
+    fn erfc_is_accurate() {
+        for (x, want) in [(0.0, 1.0), (0.5, 0.479_500_1), (1.0, 0.157_299_2), (2.0, 0.004_677_7), (-1.0, 1.842_700_8)] {
+            assert!((erfc(x) - want).abs() < 1e-5, "erfc({x}) = {}", erfc(x));
+        }
+    }
+
+    // Closed now-playing waveform.
+    #[test]
+    fn waveform_moves_while_playing_and_rests_when_paused() {
+        for i in 0..WAVE_BARS {
+            let levels: Vec<f32> = (0..300).map(|k| wave_level(i, k as f32 / 60.0, true)).collect();
+            let (lo, hi) = levels.iter().fold((1.0f32, 0.0f32), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+            assert!(lo > 0.1 && hi <= 1.0, "bar {i} stays in range: {lo}..{hi}");
+            assert!(hi - lo > 0.2, "bar {i} visibly moves");
+            // Smooth at 30 fps: no bar jumps more than a third of its height between frames.
+            let frames: Vec<f32> = (0..300).map(|k| wave_level(i, k as f32 / 30.0, true)).collect();
+            assert!(frames.windows(2).all(|p| (p[1] - p[0]).abs() < 0.34));
+            assert_eq!(wave_level(i, 1.234, false), 0.15, "paused: low and still");
+        }
+        // Taller in the middle than at the ends, like the iPhone's.
+        let peak = |i| (0..600).map(|k| wave_level(i, k as f32 / 60.0, true)).fold(0.0f32, f32::max);
+        assert!(peak(2) > peak(0) && peak(2) > peak(WAVE_BARS - 1));
     }
 }

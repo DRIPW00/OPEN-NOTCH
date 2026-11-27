@@ -22,7 +22,8 @@ in a loop. It opens on the page you were on last.
 
 - **Home**: time, date and a battery ring. A green dot while an app uses the camera, an orange
   dot for the microphone; hover the dots to see which apps.
-- **Music**: album art, a live equalizer and full controls for whatever is playing (Apple Music,
+- **Music**: while something plays, the closed notch shows its album art and a moving
+  waveform. Open, album art, a live waveform and full controls for whatever is playing (Apple Music,
   Spotify, browsers…). Shuffle and repeat show for apps that support them. Other apps playing
   at the same time appear as tabs; the one you pick stays until it stops.
 - **File shelf**: drag files onto the notch to keep them; drag them back out onto any folder or
@@ -39,9 +40,10 @@ in a loop. It opens on the page you were on last.
     on the notch before it opens: type 0.15 to 1.5 seconds), and Open on: Hover, Click or Both.
   - Pages: turn pages on or off and drag them into your own order.
 - **Pin** (top-right of the open notch): keeps it open.
-- **Full-screen and maximised apps**: the notch shrinks to a thin bar (unless Always show is on).
-  Rest the pointer on it for the hover delay, or click it if Open on is Click or Both. With
-  Open on: Hover, clicks pass through it to the app.
+- **Full-screen apps** (games, videos, F11): the notch hides completely and frees its drawing
+  memory, coming back when you leave full screen. **Maximised apps**: it shrinks to a thin bar;
+  rest the pointer on it for the hover delay, or click it if Open on is Click or Both (with
+  Open on: Hover, clicks pass through it). Always show keeps it full size in both.
 
 ## Privacy
 

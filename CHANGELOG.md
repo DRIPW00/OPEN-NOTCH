@@ -1,5 +1,19 @@
 # Changelog
 
+## R1.02
+
+### New
+- **Now playing on the closed notch.** While music plays, the closed notch shows the album art on the left and a moving waveform in the album's colour on the right, like the iPhone. Paused music stays on the notch with the waveform resting flat; the clock only comes back once nothing is loaded.
+- **Hidden in full screen.** When a game, video or anything else goes full screen, the notch disappears completely and frees its drawing memory, then comes back when you leave full screen. Maximised windows still get the thin bar.
+
+### Changed
+- **Music keeps the notch out of the thin bar.** While music is playing or paused, a maximised window no longer shrinks the notch to the bar. It goes back to the bar once no music app is loaded.
+- **One waveform everywhere.** The old three-bar equalizer on the Home and Music pages is replaced by the six-bar waveform from the closed notch.
+- **Wider shadow.** About twice as wide, and it runs all the way up the curves that meet the top of the screen. Near the top its downward shift eases to nothing, so it follows those curves evenly instead of pooling past their tips.
+- **The thin bar** is now only for maximised apps; full screen hides the notch instead. Always show keeps it full size in both cases.
+
+### Under the hood
+- 48 automatic tests. See TEST_LOG.md.
 ## R1.01
 
 ### New
