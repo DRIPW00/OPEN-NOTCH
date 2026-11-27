@@ -1,102 +1,60 @@
 # OpenNotch
 
-A notch for Windows 10 and 11, written in Rust. It sits at the top centre
-of your screen as a MacBook-style notch and uses almost no CPU while idle.
+A MacBook-style notch for Windows 10 and 11. It sits at the top centre of your screen and
+shows what's playing, your devices and your system at a glance. It's light too: when nothing
+moves it draws nothing, so it uses almost no CPU while idle.
 
-## Download and run
+## Get started
 
-1. Download this repository (Code → Download ZIP) and unzip it, or just download
-   **`release/OpenNotch.exe`**.
-2. Double-click **`OpenNotch.exe`**. Nothing to install.
+1. Download **`release/OpenNotch.exe`** from this repository.
+2. Double-click it. There's nothing to install.
 
-The first time, Windows may show "Windows protected your PC" because the app isn't signed:
-click **More info → Run anyway**.
+The first time, Windows may say "Windows protected your PC" because the app isn't signed.
+Click **More info → Run anyway**.
 
-To quit, click the notch icon in the tray (by the clock) → **Quit OpenNotch**.
+To quit, click the notch icon in the tray (by the clock) and choose **Quit OpenNotch**.
 
-## What it does
+## Using it
 
-Hover the notch to open it (or click it; see Settings); move away and it closes after a short
-pause. Scroll on the open notch, or click its left/right edges, to switch pages: they go round
-in a loop. It opens on the page you were on last.
+Hover over the notch to open it, or click it if you set that up in Settings. Move away and it
+closes after a moment. To switch pages, scroll on the open notch or click its left or right
+edge; the pages go round in a loop, and it opens on the page you used last.
 
-- **Home**: time, date and a battery ring. A green dot while an app uses the camera, an orange
-  dot for the microphone; hover the dots to see which apps.
-- **Music**: while something plays, the closed notch shows its album art and a moving
-  waveform. Open, album art, a live waveform and full controls for whatever is playing (Apple Music,
-  Spotify, browsers…). Shuffle and repeat show for apps that support them. Other apps playing
-  at the same time appear as tabs; the one you pick stays until it stops.
-- **File shelf**: drag files onto the notch to keep them; drag them back out onto any folder or
-  app (always as a copy, the original stays put).
-- **Controls**: volume and brightness sliders, the audio output and input devices, and mute.
-  Volume and brightness keys show a small slider in the closed notch.
-- **Network**: Wi-Fi and Bluetooth switches; pick a Wi-Fi network (type a new network's password
-  right in the notch) or connect headphones and speakers.
-- **System**: CPU, RAM, GPU and SSD usage.
-- **Settings** (gear on Home):
-  - General: launch at startup, Always show (stay full size over full-screen and maximised
-    apps).
-  - Motion: animation speed (Slow to Wally West), the hover delay (how long the pointer rests
-    on the notch before it opens: type 0.15 to 1.5 seconds), and Open on: Hover, Click or Both.
-  - Pages: turn pages on or off and drag them into your own order.
-- **Pin** (top-right of the open notch): keeps it open.
-- **Full-screen apps** (games, videos, F11): the notch hides completely and frees its drawing
-  memory, coming back when you leave full screen. **Maximised apps**: it shrinks to a thin bar;
-  rest the pointer on it for the hover delay, or click it if Open on is Click or Both (with
-  Open on: Hover, clicks pass through it). Always show keeps it full size in both.
+- **Home**: the time, date and battery. A green dot shows when an app is using the camera, an
+  orange dot for the microphone; hover over the dots to see which apps.
+- **Music**: album art, a live waveform and full controls for whatever is playing (Apple Music,
+  Spotify, browsers and more). Shuffle and repeat appear for apps that support them. If several
+  apps are playing, each gets a tab. While music plays, the closed notch shows the album art and
+  a small waveform.
+- **File shelf**: drag files onto the notch to keep them handy, then drag them out onto any
+  folder or app. Files are always copied; the originals stay where they are.
+- **Controls**: volume and brightness sliders, mute, and your audio output and input devices.
+  The volume and brightness keys show a small slider in the closed notch.
+- **Network**: turn Wi-Fi and Bluetooth on or off, join a Wi-Fi network (type the password right
+  in the notch) or connect headphones and speakers.
+- **System**: CPU, RAM, GPU and disk usage.
+- **Pin** (top right of the open notch): keeps it open.
+
+**Settings** (the gear on Home):
+
+- **General**: launch at startup, and Always show, which keeps the notch full size even over
+  full-screen and maximised apps.
+- **Motion**: animation speed, how long the pointer rests on the notch before it opens (0.15 to
+  1.5 seconds), and whether it opens on hover, click or both.
+- **Pages**: turn pages on or off and drag them into your own order.
+
+**Full-screen apps** (games, videos, F11): the notch hides completely and comes back when you
+leave full screen. **Maximised apps**: it shrinks to a thin bar that opens like the notch does.
 
 ## Privacy
 
 - Everything stays on your PC. The app makes no internet connections and collects nothing.
-- The only file it writes is `%APPDATA%\OpenNotch\settings.ini` (your settings and the
-  last page you were on). "Launch at startup" adds one entry to Windows' startup apps
-  (`HKCU\...\CurrentVersion\Run`), removed when you turn it off.
-- Wi-Fi passwords you type are handed to Windows (which stores them like the Wi-Fi menu does)
-  and are not kept by the app.
+- It saves only one file, `%APPDATA%\OpenNotch\settings.ini`, with your settings and the last
+  page you were on. "Launch at startup" adds one entry to Windows' startup apps, removed when
+  you turn it off.
+- Wi-Fi passwords you type go to Windows, which stores them as the Wi-Fi menu does. The app
+  doesn't keep them.
 
-## Build it yourself
+## What's new
 
-Needs [Rust](https://rustup.rs) (and the Visual Studio C++ build tools that its installer offers).
-
-From a terminal in this folder:
-
-```powershell
-cargo build --release   # builds target\release\opennotch.exe
-cargo run --release     # builds it and starts it
-```
-
-## Project layout
-
-```
-release/OpenNotch.exe        the ready-to-run app
-CHANGELOG.md                 what's new in each version
-Cargo.toml, Cargo.lock       Rust project and exact dependency versions
-build.rs                     puts assets/icon.ico into the exe (no extra tools)
-assets/icon.ico              the app and tray icon
-src/
-  main.rs        the app's state, sizes, animation and drawing order; mouse/keyboard handling
-  window.rs      startup, the message loop, staying on top, full-screen detection
-  home.rs        the closed notch and Home view: clock, now playing, privacy dots, volume pill
-  pages.rs       the open card's pages (Controls, Music, Shelf, Network, System) and paging
-  settings_card.rs  the Settings card and its tabs
-  shadow.rs      the notch's soft shadow
-  waveform.rs    the now-playing waveform
-  spring.rs      animation curves (springs and eased slides)
-  gfx.rs         drawing helpers: icons, text, images, rings
-  tray.rs        the tray icon and its menu (Hide notch, Quit)
-  settings.rs    your settings and last page (saved to settings.ini)
-  startup.rs     "Launch at startup" (Windows' startup apps)
-  sysinfo.rs     clock, date and battery
-  privacy.rs     which apps use the camera / microphone
-  media.rs       every app's now-playing info and controls (Windows media controls)
-  audio.rs       volume, mute, audio devices
-  brightness.rs  built-in display brightness
-  wifi.rs        Wi-Fi networks: scan, join, passwords
-  bluetooth.rs   paired Bluetooth devices; connects headphones/speakers
-  radios.rs      Wi-Fi and Bluetooth on/off
-  shelf.rs       the file shelf: drop target, drag out, thumbnails
-  stats.rs       CPU, RAM, GPU and disk usage (only sampled while the System page is open)
-```
-
-While animating it draws one frame per refresh of the monitor the notch is on (60, 120, 144,
-240 Hz…). When nothing moves it draws nothing. Only one copy runs at a time.
+See [CHANGELOG.md](CHANGELOG.md).
