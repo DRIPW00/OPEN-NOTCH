@@ -1,4 +1,4 @@
-// Dynamic Island for Windows.
+// OpenNotch for Windows.
 //
 // How it works:
 // - One borderless, always-on-top "layered" window sits at the top centre of the screen,

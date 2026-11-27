@@ -1,8 +1,8 @@
 [package]
-name = "dynamic-island"
+name = "opennotch"
 version = "0.1.0"
 edition = "2021"
-description = "An iOS-style Dynamic Island for Windows"
+description = "OpenNotch: a notch for the top of your Windows screen"
 
 [dependencies]
 windows-numerics = "0.3" # Vector2, used for Direct2D points

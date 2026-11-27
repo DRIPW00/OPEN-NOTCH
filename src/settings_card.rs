@@ -164,7 +164,7 @@ impl App {
             _ => {
                 let top = SETTINGS_CONTENT;
                 set(0xFFFFFF, 1.0);
-                self.gfx.text(t, "Dynamic Island for Windows", &self.gfx.fonts.pill, rect(at(0.0), y(top), at(w_box), y(top + 22.0)), brush);
+                self.gfx.text(t, "OpenNotch for Windows", &self.gfx.fonts.pill, rect(at(0.0), y(top), at(w_box), y(top + 22.0)), brush);
                 set(0x98989F, 1.0);
                 let line = format!("Version {ABOUT_VERSION} · Made by {ABOUT_AUTHOR}");
                 self.gfx.text(t, &line, &self.gfx.fonts.time, rect(at(0.0), y(top + 24.0), at(w_box), y(top + 40.0)), brush);

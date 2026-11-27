@@ -7,11 +7,13 @@ use windows::Win32::System::Registry::*;
 
 const RUN: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const APPROVED: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run");
-const NAME: PCWSTR = w!("Dynamic Island");
+const NAME: PCWSTR = w!("OpenNotch");
+/// The Run value's name up to R1.03, when the app was called Dynamic Island.
+const OLD_NAME: PCWSTR = w!("Dynamic Island");
 
 /// Starts with Windows: our Run value exists and Task Manager hasn't disabled it.
 pub fn enabled() -> bool {
-    unsafe { read(RUN).is_some() && read(APPROVED).is_none_or(|data| approved(&data)) }
+    unsafe { read(RUN, NAME).is_some() && read(APPROVED, NAME).is_none_or(|data| approved(&data)) }
 }
 
 /// Turn it on or off. Returns the state afterwards (what the switch should show).
@@ -21,21 +23,29 @@ pub fn set(on: bool) -> bool {
             if let Some(exe) = exe() {
                 write(&command(&exe));
                 // Clear a "disabled" left by Task Manager, or the Run value would be ignored.
-                delete(APPROVED);
+                delete(APPROVED, NAME);
             }
         } else {
-            delete(RUN);
+            delete(RUN, NAME);
         }
     }
     enabled()
 }
 
 /// If it's on but points at an exe that no longer exists (the folder was moved), point it
-/// here. A second copy run from elsewhere doesn't take it over.
+/// here. A second copy run from elsewhere doesn't take it over. Also moves an entry left
+/// under the old name to the new one, keeping it on or off as it was.
 pub fn refresh_path() {
     let Some(exe) = exe() else { return };
     unsafe {
-        if let Some(data) = read(RUN) {
+        if read(RUN, OLD_NAME).is_some() {
+            if read(APPROVED, OLD_NAME).is_none_or(|data| approved(&data)) {
+                write(&command(&exe));
+            }
+            delete(RUN, OLD_NAME);
+            delete(APPROVED, OLD_NAME);
+        }
+        if let Some(data) = read(RUN, NAME) {
             if stale(&text(&data)) {
                 write(&command(&exe));
             }
@@ -52,7 +62,7 @@ fn exe() -> Option<String> {
     std::env::current_exe().ok().map(|p| p.to_string_lossy().into_owned())
 }
 
-/// The Run value: the exe's path in quotes (paths have spaces: "Dynamic Island.exe").
+/// The Run value: the exe's path in quotes (paths can have spaces).
 fn command(exe: &str) -> String {
     format!("\"{exe}\"")
 }
@@ -68,14 +78,14 @@ fn text(data: &[u8]) -> String {
     String::from_utf16_lossy(&wide).trim_end_matches('\0').to_string()
 }
 
-unsafe fn read(key: PCWSTR) -> Option<Vec<u8>> {
+unsafe fn read(key: PCWSTR, name: PCWSTR) -> Option<Vec<u8>> {
     let mut size = 0u32;
     let flags = RRF_RT_REG_SZ | RRF_RT_REG_BINARY;
-    if RegGetValueW(HKEY_CURRENT_USER, key, NAME, flags, None, None, Some(&mut size)).is_err() {
+    if RegGetValueW(HKEY_CURRENT_USER, key, name, flags, None, None, Some(&mut size)).is_err() {
         return None;
     }
     let mut data = vec![0u8; size as usize];
-    RegGetValueW(HKEY_CURRENT_USER, key, NAME, flags, None, Some(data.as_mut_ptr().cast()), Some(&mut size)).ok().ok()?;
+    RegGetValueW(HKEY_CURRENT_USER, key, name, flags, None, Some(data.as_mut_ptr().cast()), Some(&mut size)).ok().ok()?;
     data.truncate(size as usize);
     Some(data)
 }
@@ -86,8 +96,8 @@ unsafe fn write(value: &str) {
     let _ = RegSetKeyValueW(HKEY_CURRENT_USER, RUN, NAME, REG_SZ.0, Some(bytes.as_ptr().cast()), bytes.len() as u32);
 }
 
-unsafe fn delete(key: PCWSTR) {
-    let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, key, NAME);
+unsafe fn delete(key: PCWSTR, name: PCWSTR) {
+    let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, key, name);
 }
 
 #[cfg(test)]
@@ -97,7 +107,7 @@ mod tests {
     // F4: launch at startup.
     #[test]
     fn run_command_quotes_paths_with_spaces() {
-        assert_eq!(command(r"C:\PROJECTS\Opennotch\release\Dynamic Island.exe"), r#""C:\PROJECTS\Opennotch\release\Dynamic Island.exe""#);
+        assert_eq!(command(r"C:\My Apps\OpenNotch.exe"), r#""C:\My Apps\OpenNotch.exe""#);
     }
 
     #[test]
@@ -119,6 +129,6 @@ mod tests {
     fn only_a_missing_exe_counts_as_stale() {
         let here = std::env::current_exe().unwrap();
         assert!(!stale(&command(&here.to_string_lossy())));
-        assert!(stale(r#""C:\nowhere\moved away\Dynamic Island.exe""#));
+        assert!(stale(r#""C:\nowhere\moved away\OpenNotch.exe""#));
     }
 }

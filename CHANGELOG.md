@@ -1,5 +1,10 @@
 # Changelog
 
+## R1.03: renamed to OpenNotch
+
+### Changed
+- **The app is now called OpenNotch.** The exe is `release\OpenNotch.exe`, and the window, tray menu and Settings say OpenNotch. Your settings move over by themselves (copied once from `%APPDATA%\DynamicIsland` to `%APPDATA%\OpenNotch`), and if "Launch at startup" was on it stays on under the new name.
+
 ## R1.03
 
 ### Fixed

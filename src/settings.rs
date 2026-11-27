@@ -1,5 +1,5 @@
 //! Your notch settings: which pages show and in what order, the last page you were on, and
-//! the options in Settings. Saved to a small text file (%APPDATA%\DynamicIsland\settings.ini)
+//! the options in Settings. Saved to a small text file (%APPDATA%\OpenNotch\settings.ini)
 //! so they survive restarts.
 
 use crate::Page;
@@ -97,8 +97,19 @@ fn from_key(text: &str) -> Option<Page> {
 }
 
 fn path() -> Option<std::path::PathBuf> {
-    let base = std::env::var_os("APPDATA")?;
-    Some(std::path::Path::new(&base).join("DynamicIsland").join("settings.ini"))
+    Some(settings_in(std::path::Path::new(&std::env::var_os("APPDATA")?)))
+}
+
+/// <base>\OpenNotch\settings.ini. Up to R1.03 the app was called Dynamic Island and saved to
+/// <base>\DynamicIsland: copy that file over once so nobody loses their settings.
+fn settings_in(base: &std::path::Path) -> std::path::PathBuf {
+    let new = base.join("OpenNotch").join("settings.ini");
+    let old = base.join("DynamicIsland").join("settings.ini");
+    if !new.exists() && old.exists() {
+        let _ = std::fs::create_dir_all(base.join("OpenNotch"));
+        let _ = std::fs::copy(&old, &new);
+    }
+    new
 }
 
 impl Prefs {
@@ -189,6 +200,25 @@ impl Prefs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Rename: settings saved under the old name are carried over once, then left alone.
+    #[test]
+    fn old_settings_carry_over_to_opennotch() {
+        let base = std::env::temp_dir().join(format!("opennotch-rename-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("DynamicIsland")).unwrap();
+        std::fs::write(base.join("DynamicIsland").join("settings.ini"), "speed=fast").unwrap();
+
+        let new = settings_in(&base);
+        assert_eq!(new, base.join("OpenNotch").join("settings.ini"));
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "speed=fast");
+
+        // Once the new file exists, the old one never overwrites it.
+        std::fs::write(&new, "speed=slow").unwrap();
+        settings_in(&base);
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "speed=slow");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn parse_fills_in_missing_pages() {

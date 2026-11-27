@@ -1,18 +1,18 @@
-# Dynamic Island for Windows
+# OpenNotch
 
-An iOS-style Dynamic Island for Windows 10 and 11, written in Rust. It sits at the top centre
+A notch for Windows 10 and 11, written in Rust. It sits at the top centre
 of your screen as a MacBook-style notch and uses almost no CPU while idle.
 
 ## Download and run
 
 1. Download this repository (Code → Download ZIP) and unzip it, or just download
-   **`release/Dynamic Island.exe`**.
-2. Double-click **`Dynamic Island.exe`**. Nothing to install.
+   **`release/OpenNotch.exe`**.
+2. Double-click **`OpenNotch.exe`**. Nothing to install.
 
 The first time, Windows may show "Windows protected your PC" because the app isn't signed:
 click **More info → Run anyway**.
 
-To quit, click the notch icon in the tray (by the clock) → **Quit Dynamic Island**.
+To quit, click the notch icon in the tray (by the clock) → **Quit OpenNotch**.
 
 ## What it does
 
@@ -48,7 +48,7 @@ in a loop. It opens on the page you were on last.
 ## Privacy
 
 - Everything stays on your PC. The app makes no internet connections and collects nothing.
-- The only file it writes is `%APPDATA%\DynamicIsland\settings.ini` (your settings and the
+- The only file it writes is `%APPDATA%\OpenNotch\settings.ini` (your settings and the
   last page you were on). "Launch at startup" adds one entry to Windows' startup apps
   (`HKCU\...\CurrentVersion\Run`), removed when you turn it off.
 - Wi-Fi passwords you type are handed to Windows (which stores them like the Wi-Fi menu does)
@@ -61,14 +61,14 @@ Needs [Rust](https://rustup.rs) (and the Visual Studio C++ build tools that its 
 From a terminal in this folder:
 
 ```powershell
-cargo build --release   # builds target\release\dynamic-island.exe
+cargo build --release   # builds target\release\opennotch.exe
 cargo run --release     # builds it and starts it
 ```
 
 ## Project layout
 
 ```
-release/Dynamic Island.exe   the ready-to-run app
+release/OpenNotch.exe        the ready-to-run app
 CHANGELOG.md                 what's new in each version
 Cargo.toml, Cargo.lock       Rust project and exact dependency versions
 build.rs                     puts assets/icon.ico into the exe (no extra tools)

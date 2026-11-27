@@ -1,5 +1,5 @@
 //! The system tray icon (the "show hidden icons" area by the clock).
-//! Click it (left or right) for a menu with "Quit Dynamic Island".
+//! Click it (left or right) for a menu with "Quit OpenNotch".
 
 use std::cell::Cell;
 
@@ -26,7 +26,7 @@ pub struct Tray {
 
 impl Tray {
     pub unsafe fn create(instance: HINSTANCE) -> Result<Tray> {
-        let class_name = w!("DynamicIslandTray");
+        let class_name = w!("OpenNotchTray");
         let wc = WNDCLASSW {
             lpfnWndProc: Some(tray_wnd_proc),
             hInstance: instance,
@@ -39,7 +39,7 @@ impl Tray {
         let hwnd = CreateWindowExW(
             WS_EX_TOOLWINDOW,
             class_name,
-            w!("Dynamic Island tray"),
+            w!("OpenNotch tray"),
             WS_POPUP,
             0,
             0,
@@ -82,7 +82,7 @@ fn icon_data(hwnd: HWND) -> NOTIFYICONDATAW {
         hIcon: ICON.with(|icon| icon.get()),
         ..Default::default()
     };
-    let tip: Vec<u16> = "Dynamic Island".encode_utf16().collect();
+    let tip: Vec<u16> = "OpenNotch".encode_utf16().collect();
     data.szTip[..tip.len()].copy_from_slice(&tip);
     data
 }
@@ -94,9 +94,9 @@ unsafe fn add_icon(hwnd: HWND) {
 
 unsafe fn show_menu(hwnd: HWND) {
     let Ok(menu) = CreatePopupMenu() else { return };
-    let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w!("Dynamic Island"));
+    let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, w!("OpenNotch"));
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-    let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Quit Dynamic Island"));
+    let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Quit OpenNotch"));
 
     let mut cursor = POINT::default();
     let _ = GetCursorPos(&mut cursor);

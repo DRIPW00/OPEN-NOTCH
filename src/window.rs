@@ -108,7 +108,7 @@ pub(crate) fn run() -> Result<()> {
     unsafe {
         // Only one copy at a time: if it's already running, quietly exit.
         // (The handle is never closed, so the lock lasts as long as this process.)
-        let _single_instance = CreateMutexW(None, true, w!("Local\\DynamicIslandForWindows"))?;
+        let _single_instance = CreateMutexW(None, true, w!("Local\\OpenNotch"))?;
         if GetLastError() == ERROR_ALREADY_EXISTS {
             return Ok(());
         }
@@ -120,7 +120,7 @@ pub(crate) fn run() -> Result<()> {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
         let instance: HINSTANCE = GetModuleHandleW(None)?.into();
-        let class_name = w!("DynamicIslandWindow");
+        let class_name = w!("OpenNotchWindow");
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wnd_proc),
             hInstance: instance,
@@ -137,7 +137,7 @@ pub(crate) fn run() -> Result<()> {
         let hwnd = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             class_name,
-            w!("Dynamic Island"),
+            w!("OpenNotch"),
             WS_POPUP,
             0,
             0,
@@ -154,13 +154,13 @@ pub(crate) fn run() -> Result<()> {
 
         // The notch's soft shadow lives in its own window just below it, which lets every
         // click through (so the shadow never blocks what's under it).
-        let shadow_class = w!("DynamicIslandShadow");
+        let shadow_class = w!("OpenNotchShadow");
         let shadow_wc = WNDCLASSW { lpfnWndProc: Some(shadow_proc), hInstance: instance, lpszClassName: shadow_class, ..Default::default() };
         RegisterClassW(&shadow_wc);
         let shadow = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             shadow_class,
-            w!("Dynamic Island shadow"),
+            w!("OpenNotch shadow"),
             WS_POPUP,
             0,
             0,
