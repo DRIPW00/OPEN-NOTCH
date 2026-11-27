@@ -565,8 +565,9 @@ fn app_name(id: &str) -> String {
     }
     // Fallback: "Company.AppName_hash!App" or "C:\...\app.exe" -> "AppName" / "app"
     let mut name = id.rsplit(['\\', '/']).next().unwrap_or(id);
-    name = name.split('!').next().unwrap_or(name);
-    name = name.split('_').next().unwrap_or(name);
+    if let Some((package, _)) = name.split_once('!') {
+        name = package.split('_').next().unwrap_or(package); // Store app: drop the "_hash" part
+    }
     name = name.trim_end_matches(".exe").trim_end_matches(".EXE");
     name = name.rsplit('.').next().unwrap_or(name);
     if name.is_empty() { "Media".into() } else { name.to_string() }
@@ -611,5 +612,23 @@ mod tests {
         assert_eq!(super::clean_artist("Dr. Dre \u{2014} 2001", ""), "Dr. Dre");
         assert_eq!(super::clean_artist("Daft Punk", "Discovery"), "Daft Punk");
         assert_eq!(super::clean_artist("A - B", "B"), "A");
+    }
+
+    // Bug hunt B3: a plain .exe keeps the underscores in its name.
+    #[test]
+    fn app_names() {
+        assert_eq!(super::app_name(r"C:\Apps\my_player.exe"), "my_player");
+        assert_eq!(super::app_name(r"C:\Games!\my_player.exe"), "my_player"); // "!" in a folder
+        assert_eq!(super::app_name("Company.CoolPlayer_8wekyb3d8bbwe!App"), "CoolPlayer");
+        assert_eq!(super::app_name("Spotify.exe"), "Spotify");
+        assert_eq!(super::app_name("Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"), "Media Player");
+        assert_eq!(super::app_name(""), "Media");
+    }
+
+    #[test]
+    fn accent_of_grey_art_is_amber_and_colours_are_readable() {
+        assert_eq!(super::accent_colour(&[128, 128, 128, 255].repeat(64)), [0.95, 0.65, 0.25]);
+        let dark_blue = super::accent_colour(&[60, 0, 0, 255].repeat(64)); // BGRA
+        assert!(dark_blue[2] >= 0.85 && dark_blue[0] < 0.1, "lifted to readable: {dark_blue:?}");
     }
 }

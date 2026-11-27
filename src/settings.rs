@@ -55,7 +55,7 @@ pub fn parse_delay(text: &str) -> Option<u32> {
 
 /// Milliseconds as the box shows them: "0.3", "0.75", "1.5".
 pub fn delay_text(ms: u32) -> String {
-    let text = format!("{:.2}", ms as f32 / 1000.0);
+    let text = format!("{:.3}", ms as f32 / 1000.0);
     text.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
@@ -296,6 +296,30 @@ mod tests {
         assert_eq!(delay_text(1500), "1.5");
         assert_eq!(delay_text(1000), "1");
         assert_eq!(parse_delay(&delay_text(850)), Some(850)); // what it shows reads back the same
+    }
+
+    // Bug hunt B2: every allowed delay shows the exact value it uses.
+    #[test]
+    fn every_delay_reads_back_exactly() {
+        for ms in HOVER_MIN_MS..=HOVER_MAX_MS {
+            assert_eq!(parse_delay(&delay_text(ms)), Some(ms), "{ms} ms shows as {}", delay_text(ms));
+        }
+    }
+
+    #[test]
+    fn delay_rejects_nan_and_negative() {
+        assert_eq!(parse_delay("NaN"), None);
+        assert_eq!(parse_delay("-1"), Some(HOVER_MIN_MS));
+    }
+
+    #[test]
+    fn reorder_ignores_bad_positions() {
+        let mut p = Prefs::default();
+        p.reorder(0, 99);
+        p.reorder(99, 0);
+        assert_eq!(p.order, Prefs::default().order);
+        p.reorder(0, 4);
+        assert_eq!(p.order.last(), Some(&Page::Music));
     }
 
     // Open on: Hover / Click / Both.

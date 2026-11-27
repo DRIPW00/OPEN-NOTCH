@@ -88,6 +88,7 @@ pub fn start(notify: HWND) -> Arc<Shared> {
         loop {
             if let Some(devices) = &devices {
                 let pids = mic_users(devices);
+                names.keep(&pids);
                 state.set(MIC, pids.into_iter().map(|pid| names.get(pid)).collect());
             }
             std::thread::sleep(MIC_CHECK_EVERY);
@@ -121,25 +122,40 @@ unsafe fn mic_users(devices: &IMMDeviceEnumerator) -> Vec<u32> {
 
 /// Friendly app names for process ids ("Discord", "NVIDIA Broadcast", "Google Chrome"),
 /// from each program's own description. Cached, since apps don't rename themselves.
+/// Each name is kept with its exe's path and only reused while that still matches:
+/// Windows reuses process ids, so a new app could otherwise show a closed app's name.
 #[derive(Default)]
-struct Names(HashMap<u32, String>);
+struct Names(HashMap<u32, (Option<String>, String)>);
 
 impl Names {
     fn get(&mut self, pid: u32) -> String {
-        self.0.entry(pid).or_insert_with(|| unsafe { app_name(pid) }).clone()
+        let path = if pid == 0 { None } else { unsafe { process_path(pid) } };
+        if let Some((cached, name)) = self.0.get(&pid) {
+            if *cached == path {
+                return name.clone();
+            }
+        }
+        let name = unsafe { app_name(pid, path.as_deref()) };
+        self.0.insert(pid, (path, name.clone()));
+        name
+    }
+
+    /// Forget every process not in `pids`, so the cache only holds apps in use.
+    fn keep(&mut self, pids: &[u32]) {
+        self.0.retain(|pid, _| pids.contains(pid));
     }
 }
 
-unsafe fn app_name(pid: u32) -> String {
+unsafe fn app_name(pid: u32, path: Option<&str>) -> String {
     if pid == 0 {
         return "Windows".into();
     }
-    let Some(path) = process_path(pid) else { return "Windows".into() }; // protected system process
-    let stem = path.rsplit('\\').next().unwrap_or(&path).trim_end_matches(".exe").trim_end_matches(".EXE").to_string();
+    let Some(path) = path else { return "Windows".into() }; // protected system process
+    let stem = path.rsplit('\\').next().unwrap_or(path).trim_end_matches(".exe").trim_end_matches(".EXE").to_string();
     if stem.eq_ignore_ascii_case("svchost") || stem.eq_ignore_ascii_case("audiodg") {
         return "Windows".into();
     }
-    file_description(&path).filter(|d| !d.trim().is_empty()).unwrap_or(stem)
+    file_description(path).filter(|d| !d.trim().is_empty()).unwrap_or(stem)
 }
 
 unsafe fn process_path(pid: u32) -> Option<String> {
@@ -211,6 +227,11 @@ impl IMFSensorActivitiesReportCallback_Impl for CameraWatch_Impl {
                 }
             }
         }
+        if apps.is_empty() {
+            if let Ok(mut names) = self.names.lock() {
+                names.keep(&[]); // camera off: forget the apps that used it
+            }
+        }
         self.state.set(CAMERA, apps);
         Ok(())
     }
@@ -223,4 +244,36 @@ unsafe fn start_camera_monitor(state: Arc<Shared>) -> Option<IMFSensorActivityMo
     let monitor = MFCreateSensorActivityMonitor(&callback).ok()?;
     monitor.Start().ok()?;
     Some(monitor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Bug hunt B4: Windows reuses process ids; a cached name from a closed app must not stick.
+    #[test]
+    fn reused_process_id_gets_its_own_name() {
+        let pid = std::process::id();
+        let mut names = Names::default();
+        let real = names.get(pid);
+        assert!(!real.is_empty() && real != "Windows");
+        names.0.insert(pid, (Some(r"C:\gone\Old App.exe".into()), "Old App".into()));
+        assert_eq!(names.get(pid), real);
+    }
+
+    #[test]
+    fn cache_forgets_apps_no_longer_in_use() {
+        let mut names = Names::default();
+        names.get(std::process::id());
+        names.get(0);
+        names.keep(&[0]);
+        assert_eq!(names.0.keys().copied().collect::<Vec<_>>(), vec![0]);
+        names.keep(&[]);
+        assert!(names.0.is_empty());
+    }
+
+    #[test]
+    fn system_idle_process_is_windows() {
+        assert_eq!(Names::default().get(0), "Windows");
+    }
 }

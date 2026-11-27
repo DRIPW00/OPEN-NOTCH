@@ -240,17 +240,20 @@ unsafe fn cpu_name() -> String {
 /// "AMD Ryzen 7 7840HS w/ Radeon 780M Graphics" -> "Ryzen 7 7840HS"
 fn short_cpu_name(name: &str) -> String {
     let mut n = name.replace("(R)", "").replace("(TM)", "").replace("(tm)", "");
-    // Drop everything before the brand line ("13th Gen Intel ", "AMD ").
-    for brand in ["Core", "Ryzen", "Celeron", "Pentium", "Xeon", "Athlon", "Snapdragon", "Apple"] {
-        if let Some(i) = n.find(brand) {
-            n = n[i..].to_string();
-            break;
-        }
+    // Drop everything before the brand line ("13th Gen Intel ", "AMD "). The earliest brand
+    // wins: "Ryzen 5 5600X 6-Core Processor" also contains "Core".
+    let brands = ["Core", "Ryzen", "Celeron", "Pentium", "Xeon", "Athlon", "Snapdragon", "Apple"];
+    if let Some(i) = brands.iter().filter_map(|b| n.find(b)).min() {
+        n = n[i..].to_string();
     }
     for cut in [" w/ ", " with ", " CPU", " @", " Processor", " Mobile", " Compute Engine"] {
         if let Some(i) = n.find(cut) {
             n.truncate(i);
         }
+    }
+    // "Ryzen 9 7950X 16-Core": the core count doesn't fit under the CPU ring.
+    if let Some(i) = n.trim_end().rfind(' ').filter(|i| n.trim_end()[i + 1..].ends_with("-Core")) {
+        n.truncate(i);
     }
     n.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -279,5 +282,24 @@ mod tests {
     fn short_cpu_names() {
         assert_eq!(super::short_cpu_name("13th Gen Intel(R) Core(TM) i7-13650HX"), "Core i7-13650HX");
         assert_eq!(super::short_cpu_name("AMD Ryzen 7 7840HS w/ Radeon 780M Graphics"), "Ryzen 7 7840HS");
+    }
+
+    // Bug hunt B1: desktop Ryzen names end in "N-Core Processor"; "Core" must not win.
+    #[test]
+    fn ryzen_core_count_is_not_the_brand() {
+        assert_eq!(super::short_cpu_name("AMD Ryzen 5 5600X 6-Core Processor"), "Ryzen 5 5600X");
+        assert_eq!(super::short_cpu_name("AMD Ryzen 9 7950X 16-Core Processor"), "Ryzen 9 7950X");
+    }
+
+    #[test]
+    fn intel_names_with_clock_speed() {
+        assert_eq!(super::short_cpu_name("Intel(R) Core(TM) i7-8550U CPU @ 1.80GHz"), "Core i7-8550U");
+        assert_eq!(super::short_cpu_name("Intel(R) Core(TM) Ultra 7 155H"), "Core Ultra 7 155H");
+    }
+
+    #[test]
+    fn unknown_cpu_name_is_kept() {
+        assert_eq!(super::short_cpu_name("  Some  Future   Chip "), "Some Future Chip");
+        assert_eq!(super::short_cpu_name(""), "");
     }
 }

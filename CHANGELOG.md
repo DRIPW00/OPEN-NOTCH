@@ -12,8 +12,15 @@
 - **Wider shadow.** About twice as wide, and it runs all the way up the curves that meet the top of the screen. Near the top its downward shift eases to nothing, so it follows those curves evenly instead of pooling past their tips.
 - **The thin bar** is now only for maximised apps; full screen hides the notch instead. Always show keeps it full size in both cases.
 
+### Fixed
+- Desktop AMD processors showed as "Core" on the System page; they now show e.g. "Ryzen 5 5600X".
+- The hover delay box could round a delay like 0.855 s to "0.85" and change it when saved.
+- Music apps with "_" in their exe name showed a cut-off name on the Music page.
+- The camera/mic bubble could show a closed app's name for a new app.
+
 ### Under the hood
-- 50 automatic tests.
+- The code is split into smaller files (shadow, waveform, pages, settings card); no change in behaviour.
+- 69 automatic tests.
 ## R1.01
 
 ### New

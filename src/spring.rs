@@ -139,4 +139,41 @@ mod tests {
         assert!(e.is_settled());
         assert!((e.value - 1.0).abs() < 1e-6);
     }
+
+    #[test]
+    fn every_spring_settles_on_its_target() {
+        for config in [EXPAND, COLLAPSE, ROW, POP_IN, POP_OUT] {
+            let mut s = Spring::new(0.0);
+            s.set_target(100.0, config);
+            for _ in 0..600 {
+                s.step(1.0 / 60.0);
+            }
+            assert!(s.is_settled() && s.value == 100.0);
+        }
+    }
+
+    // The longest frame tick() allows (50 ms) at the fastest speed (x10): still stable.
+    #[test]
+    fn spring_survives_the_longest_frame() {
+        let mut s = Spring::new(0.0);
+        s.set_target(500.0, POP_IN);
+        for _ in 0..20 {
+            s.step(0.5);
+            assert!(s.value.is_finite() && s.value.abs() < 1000.0);
+        }
+        assert_eq!(s.value, 500.0);
+    }
+
+    #[test]
+    fn ease_retargeted_mid_slide_keeps_moving() {
+        let mut e = Ease::new(0.0);
+        e.set_target(1.0);
+        e.step(0.1);
+        let mid = e.value;
+        e.set_target(2.0);
+        e.step(1.0 / 60.0);
+        assert!(e.value > mid, "no stall when retargeted");
+        e.step(1.0);
+        assert_eq!(e.value, 2.0);
+    }
 }

@@ -380,4 +380,20 @@ mod tests {
         assert!(xml.contains("<keyMaterial>p&quot;ss&apos;&lt;&gt;&amp;</keyMaterial>"));
         assert!(xml.contains("<authentication>WPA2PSK</authentication>"));
     }
+
+    #[test]
+    fn open_network_profile_has_no_password() {
+        let network = Network { ssid: "Free".into(), signal: 50, secured: false, connected: false, profile: None, security: Security::Open };
+        let xml = profile_xml(&network, "ignored");
+        assert!(xml.contains("<authentication>open</authentication>") && !xml.contains("ignored"));
+    }
+
+    #[test]
+    fn security_kinds() {
+        let s = |a, c, secured| Security::from(a, c, secured);
+        assert!(matches!(s(DOT11_AUTH_ALGO_RSNA_PSK, DOT11_CIPHER_ALGO_CCMP, false), Security::Open));
+        assert!(matches!(s(DOT11_AUTH_ALGO_RSNA_PSK, DOT11_CIPHER_ALGO_TKIP, true), Security::Password { auth: "WPA2PSK", encryption: "TKIP" }));
+        assert!(matches!(s(DOT11_AUTH_ALGO_WPA3_SAE, DOT11_CIPHER_ALGO_CCMP, true), Security::Password { auth: "WPA3SAE", .. }));
+        assert!(matches!(s(DOT11_AUTH_ALGO_RSNA, DOT11_CIPHER_ALGO_CCMP, true), Security::Unsupported));
+    }
 }

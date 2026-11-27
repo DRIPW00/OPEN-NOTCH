@@ -2,5 +2,4 @@
 build.log
 build.bat
 /SESSION CONTEXTS/
-TEST_LOG.md
-CLAUDE.md
+TEST_LOG*.md
