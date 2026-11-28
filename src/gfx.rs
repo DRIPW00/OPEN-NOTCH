@@ -474,11 +474,5 @@ unsafe fn svg_path(factory: &ID2D1Factory, d: &str, filled: bool) -> Result<ID2D
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn tokenizes_svg_paths() {
-        assert_eq!(super::tokenize("M19 20 L9 12 Z"), ["M", "19", "20", "L", "9", "12", "Z"]);
-        assert_eq!(super::tokenize("M4 4 H6.5 V20"), ["M", "4", "4", "H", "6.5", "V", "20"]);
-        assert_eq!(super::tokenize("A4 4 0 0 1 7 5"), ["A", "4", "4", "0", "0", "1", "7", "5"]);
-    }
-}
+#[path = "tests/gfx.rs"]
+mod tests;

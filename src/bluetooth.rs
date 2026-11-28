@@ -220,24 +220,5 @@ fn names_match(filter: &str, device: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn matching() {
-        assert!(super::names_match("AirPods Pro Stereo", "AirPods Pro"));
-        assert!(super::names_match("AirPods Pro", "AirPods Pro"));
-        assert!(!super::names_match("Speakers", "AirPods Pro"));
-        assert!(super::names_match("AirPods Pro Hands-Free", "AirPods Pro"));
-        assert!(!super::names_match("JBL Flip 5 Stereo", "JBL Flip"));
-        assert!(!super::names_match("AirPods Pro Hands-Free", "AirPods"));
-        assert!(super::names_match("airpods pro stereo", "AirPods Pro")); // case doesn't matter
-    }
-
-    #[test]
-    fn device_kinds_from_class() {
-        use super::{kind, Kind};
-        assert!(matches!(kind(0x24_0404), Kind::Audio)); // headphones
-        assert!(matches!(kind(0x00_0540), Kind::Input)); // keyboard
-        assert!(matches!(kind(0x5A_020C), Kind::Phone));
-        assert!(matches!(kind(0), Kind::Other));
-    }
-}
+#[path = "tests/bluetooth.rs"]
+mod tests;

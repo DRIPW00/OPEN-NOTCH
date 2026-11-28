@@ -48,24 +48,5 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Closed now-playing waveform.
-    #[test]
-    fn waveform_moves_while_playing_and_rests_when_paused() {
-        for i in 0..WAVE_BARS {
-            let levels: Vec<f32> = (0..300).map(|k| wave_level(i, k as f32 / 60.0, true)).collect();
-            let (lo, hi) = levels.iter().fold((1.0f32, 0.0f32), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
-            assert!(lo > 0.1 && hi <= 1.0, "bar {i} stays in range: {lo}..{hi}");
-            assert!(hi - lo > 0.2, "bar {i} visibly moves");
-            // Smooth at 30 fps: no bar jumps more than a third of its height between frames.
-            let frames: Vec<f32> = (0..300).map(|k| wave_level(i, k as f32 / 30.0, true)).collect();
-            assert!(frames.windows(2).all(|p| (p[1] - p[0]).abs() < 0.34));
-            assert_eq!(wave_level(i, 1.234, false), 0.15, "paused: low and still");
-        }
-        // Taller in the middle than at the ends, like the iPhone's.
-        let peak = |i| (0..600).map(|k| wave_level(i, k as f32 / 60.0, true)).fold(0.0f32, f32::max);
-        assert!(peak(2) > peak(0) && peak(2) > peak(WAVE_BARS - 1));
-    }
-}
+#[path = "tests/waveform.rs"]
+mod tests;

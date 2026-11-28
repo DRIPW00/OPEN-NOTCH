@@ -247,33 +247,5 @@ unsafe fn start_camera_monitor(state: Arc<Shared>) -> Option<IMFSensorActivityMo
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // Bug hunt B4: Windows reuses process ids; a cached name from a closed app must not stick.
-    #[test]
-    fn reused_process_id_gets_its_own_name() {
-        let pid = std::process::id();
-        let mut names = Names::default();
-        let real = names.get(pid);
-        assert!(!real.is_empty() && real != "Windows");
-        names.0.insert(pid, (Some(r"C:\gone\Old App.exe".into()), "Old App".into()));
-        assert_eq!(names.get(pid), real);
-    }
-
-    #[test]
-    fn cache_forgets_apps_no_longer_in_use() {
-        let mut names = Names::default();
-        names.get(std::process::id());
-        names.get(0);
-        names.keep(&[0]);
-        assert_eq!(names.0.keys().copied().collect::<Vec<_>>(), vec![0]);
-        names.keep(&[]);
-        assert!(names.0.is_empty());
-    }
-
-    #[test]
-    fn system_idle_process_is_windows() {
-        assert_eq!(Names::default().get(0), "Windows");
-    }
-}
+#[path = "tests/privacy.rs"]
+mod tests;

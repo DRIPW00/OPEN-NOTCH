@@ -101,34 +101,5 @@ unsafe fn delete(key: PCWSTR, name: PCWSTR) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    // F4: launch at startup.
-    #[test]
-    fn run_command_quotes_paths_with_spaces() {
-        assert_eq!(command(r"C:\My Apps\OpenNotch.exe"), r#""C:\My Apps\OpenNotch.exe""#);
-    }
-
-    #[test]
-    fn task_manager_disabled_counts_as_off() {
-        assert!(approved(&[0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
-        assert!(approved(&[0x06, 0, 0, 0]));
-        assert!(!approved(&[0x03, 0, 0, 0, 0x12, 0x34]));
-        assert!(!approved(&[0x07]));
-        assert!(approved(&[])); // no data: Task Manager never touched it
-    }
-
-    #[test]
-    fn registry_text_drops_trailing_nul() {
-        let bytes: Vec<u8> = "\"C:\\a b.exe\"\0".encode_utf16().flat_map(u16::to_le_bytes).collect();
-        assert_eq!(text(&bytes), "\"C:\\a b.exe\"");
-    }
-
-    #[test]
-    fn only_a_missing_exe_counts_as_stale() {
-        let here = std::env::current_exe().unwrap();
-        assert!(!stale(&command(&here.to_string_lossy())));
-        assert!(stale(r#""C:\nowhere\moved away\OpenNotch.exe""#));
-    }
-}
+#[path = "tests/startup.rs"]
+mod tests;

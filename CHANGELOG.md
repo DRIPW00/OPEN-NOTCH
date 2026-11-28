@@ -17,8 +17,6 @@
 
 ### Under the hood
 - main.rs split again: now-playing code moved to music.rs, typing (Wi-Fi password, hover delay) to typing.rs; no change in behaviour.
-- Code checker (clippy) is clean.
-- 78 automatic tests.
 
 ## R1.03: renamed to OpenNotch
 
@@ -32,7 +30,6 @@
 
 ### Under the hood
 - More of the code is split into smaller files (window, home); no change in behaviour.
-- 71 automatic tests.
 
 ## R1.02
 
@@ -54,7 +51,7 @@
 
 ### Under the hood
 - The code is split into smaller files (shadow, waveform, pages, settings card); no change in behaviour.
-- 69 automatic tests.
+
 ## R1.01
 
 ### New
@@ -90,5 +87,4 @@
 ### Under the hood
 - No new dependencies. The exe is 0.77 MB, including the icon.
 - Removed unused code: debug-only printouts, about 110 lines of tray-icon drawing (it now uses the app icon), and 9 redundant Windows features in Cargo.toml.
-- 43 automatic tests (8 in R1.00).
 - Privacy: still no internet connections. The only new thing written outside the app's settings file is the Windows startup entry, and only while Launch at startup is on.
