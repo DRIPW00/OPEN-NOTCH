@@ -33,6 +33,7 @@ mod bluetooth;
 mod brightness;
 mod gfx;
 mod media;
+mod music;
 mod privacy;
 mod radios;
 mod shelf;
@@ -48,6 +49,7 @@ mod window;
 mod home;
 mod sysinfo;
 mod tray;
+mod typing;
 mod wifi;
 
 use std::cell::RefCell;
@@ -56,6 +58,7 @@ use std::time::{Duration, Instant};
 
 use gfx::{rect, rgb, Gfx, Icon};
 use media::{Command, Media, MediaSnapshot, Repeat, Session, Status, WM_MEDIA_UPDATE};
+use music::{format_time, time_left};
 use waveform::WAVE_BARS;
 use window::{app_covers_screen, create_render_target, find_dxgi_output, monitor_refresh_hz, stay_on_top};
 use spring::{Ease, Spring, COLLAPSE, EXPAND, POP_IN, POP_OUT, ROW};
@@ -88,6 +91,8 @@ const MUSIC_H: f32 = 198.0; // Music page incl. the page dots
 const CONTROLS_H: f32 = 160.0; // Controls page incl. the page dots (device list adds more)
 /// Closed notch while the volume / brightness slider shows (after a key press).
 const HUD: (f32, f32) = (290.0, 36.0);
+/// Closed notch while the new-song pop-up shows.
+const TRACK_HUD: (f32, f32) = (340.0, 56.0);
 /// The thin bar the notch shrinks to while an app is full screen or maximised.
 const BAR: (f32, f32) = (180.0, 6.0);
 /// Most devices listed in a picker (keeps the card on screen).
@@ -105,7 +110,7 @@ const TAB_GENERAL: usize = 0;
 const TAB_MOTION: usize = 1;
 const TAB_PAGES: usize = 2;
 /// Shown under About in Settings.
-const ABOUT_VERSION: &str = "V-R1.03";
+const ABOUT_VERSION: &str = "V-R1.04";
 const ABOUT_AUTHOR: &str = "DRIPWOO";
 /// The notch while files are dragged over it (the drop zone).
 const DROP: (f32, f32) = (CARD_W, 140.0);
@@ -155,6 +160,9 @@ const BRIGHT_YELLOW: u32 = 0xFFD60A;
 /// Hides the volume / brightness slider in the closed notch after a key press.
 const HUD_TIMER: usize = 6;
 const HUD_MS: u32 = 1600;
+const TRACK_HUD_MS: u32 = 3000;
+/// Re-checks paused music when Settings > Paused music's time is up.
+const PAUSED_TIMER: usize = 11;
 /// When the pointer leaves the open notch, wait this long before closing (it may come back).
 const LEAVE_TIMER: usize = 7;
 const LEAVE_MS: u32 = 450;
@@ -230,6 +238,8 @@ enum Action {
     AlwaysShow,
     /// Settings > Motion > Animation speed option.
     Speed(usize),
+    /// Settings > General > Paused music option (index into PAUSED_HIDE).
+    PausedHide(usize),
     /// Settings > Motion > Hover delay box (click to type in it).
     DelayBox,
     /// Settings > Motion > Open on: Hover / Click / Both.
@@ -255,6 +265,8 @@ pub enum Page {
 enum Hud {
     Volume,
     Brightness,
+    /// A new song started: art, title, artist and time left for a moment.
+    Track,
 }
 
 impl Action {
@@ -340,6 +352,12 @@ struct App {
     music_mix: Spring,
     /// Music is playing or paused (keeps the notch out of the thin bar).
     music: bool,
+    /// The song the new-song pop-up last announced (see `announce`).
+    last_song: Option<String>,
+    /// The first media snapshot sets `last_song` without a pop-up (no pop-up at launch).
+    media_seen: bool,
+    /// The shown source and since when it has been paused (Settings > Paused music).
+    paused_since: Option<(String, Instant)>,
     /// The pointer left the open notch; it closes when LEAVE_TIMER fires unless it returns.
     leaving: bool,
     /// Windows is watching for the pointer leaving (TrackMouseEvent is armed).
@@ -439,36 +457,6 @@ fn cover_kind(window: RECT, monitor: RECT, zoomed: bool, caption: bool) -> Cover
     }
 }
 
-/// Which media session the notch shows (and sends commands to). The one you picked stays
-/// until it stops or goes away: a new app starting to play, or Windows' "current" app
-/// changing, doesn't switch it (the source tabs show those). With none, it picks what's
-/// playing (Windows' current first), else what's paused.
-fn pick_source(selected: Option<&str>, sessions: &[(&str, Status)], system: Option<&str>) -> Option<String> {
-    let is = |id: &str, ok: &dyn Fn(Status) -> bool| sessions.iter().any(|(s, st)| *s == id && ok(*st));
-    let live = |st: Status| st != Status::Stopped;
-    let playing = |st: Status| st == Status::Playing;
-    if let Some(id) = selected.filter(|id| is(id, &live)) {
-        return Some(id.to_string());
-    }
-    let first = |ok: &dyn Fn(Status) -> bool| sessions.iter().find(|(_, st)| ok(*st)).map(|(id, _)| *id);
-    system
-        .filter(|id| is(id, &playing))
-        .or_else(|| first(&playing))
-        .or(system.filter(|id| is(id, &live)))
-        .or_else(|| first(&live))
-        .map(str::to_string)
-}
-
-fn format_time(secs: f64) -> String {
-    let secs = secs.max(0.0) as u64;
-    let (h, m, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
-    if h > 0 {
-        format!("{h}:{m:02}:{s:02}")
-    } else {
-        format!("{m}:{s:02}")
-    }
-}
-
 fn contains(r: &D2D_RECT_F, x: f32, y: f32) -> bool {
     x >= r.left && x < r.right && y >= r.top && y < r.bottom
 }
@@ -532,6 +520,9 @@ impl App {
             hud_mix: Spring::new(0.0),
             music_mix: Spring::new(0.0),
             music: false,
+            last_song: None,
+            media_seen: false,
+            paused_since: None,
             leaving: false,
             tracking: false,
             hover_pending: false,
@@ -651,112 +642,12 @@ impl App {
         self.vblank_output = find_dxgi_output(monitor);
     }
 
-    // ---------------------------------------------------------------- Now Playing state
-
-    fn current(&self) -> Option<&Session> {
-        let id = self.selected.as_ref()?;
-        self.sessions.iter().find(|s| &s.id == id)
-    }
-
-    fn has_media(&self) -> bool {
-        self.current().is_some_and(|s| s.status != Status::Stopped)
-    }
-
-    /// Tabs: the shown session first, then every other app with media loaded (greyed out),
-    /// playing ones before paused ones.
-    fn tabs(&self) -> Vec<&Session> {
-        let mut tabs: Vec<&Session> = self.current().into_iter().collect();
-        let others = |status: Status| {
-            self.sessions
-                .iter()
-                .filter(move |s| s.status == status && Some(&s.id) != self.selected.as_ref())
-        };
-        tabs.extend(others(Status::Playing));
-        tabs.extend(others(Status::Paused));
-        tabs
-    }
-
-    /// A new picture of what's playing arrived from media.rs. Which session it shows: see pick_source.
-    unsafe fn apply_snapshot(&mut self, snapshot: MediaSnapshot) {
-        let had_media = self.has_media();
-        let page_before = self.page_kind();
-        if let Some(notice) = snapshot.notice {
-            self.notice = Some(notice);
-            SetTimer(Some(self.hwnd), NOTICE_TIMER, NOTICE_MS, None);
-        }
-        self.sessions = snapshot.sessions;
-
-        let ids: Vec<(&str, Status)> = self.sessions.iter().map(|s| (s.id.as_str(), s.status)).collect();
-        self.selected = pick_source(self.selected.as_deref(), &ids, snapshot.system_current.as_deref());
-
-        // Upload album art for the shown session; forget art no longer needed.
-        let wanted = self.current().and_then(|s| s.art.clone());
-        self.art.retain(|key, _| wanted.as_ref().is_some_and(|a| a.key == *key));
-        if let Some(art) = wanted {
-            if !self.art.contains_key(&art.key) {
-                let t: ID2D1RenderTarget = self.target.clone().into();
-                if let (Ok(big), Ok(small)) = (
-                    gfx::bitmap(&t, &art.big, art.big_size),
-                    gfx::bitmap(&t, &art.small, art.small_size),
-                ) {
-                    self.art.insert(art.key, (big, small));
-                }
-            }
-        }
-
-
-        // The Music page comes and goes with media: stay on the same page if it still exists.
-        match self.pages().iter().position(|p| *p == page_before) {
-            Some(i) => {
-                if i != self.page {
-                    self.page = i;
-                    self.page_pos = Ease::new(i as f32);
-                }
-                if had_media != self.has_media() {
-                    self.set_expanded(self.hovered);
-                }
-            }
-            None => self.switch_page(0), // the Music page went away
-        }
-        self.update_ticker();
-        let _ = self.render();
-    }
-
-    /// Redraw on a timer while music plays: waveform when closed, progress bar when open.
-    unsafe fn update_ticker(&mut self) {
-        let playing = self.current().is_some_and(|s| s.status == Status::Playing);
-        // The closed notch cross-fades between the clock and now playing; paused music stays.
-        let loaded = self.current().is_some_and(|s| s.status != Status::Stopped);
-        let mix = if loaded { 1.0 } else { 0.0 };
-        // Music playing or paused: never the thin bar (re-checked when that changes).
-        if loaded != self.music {
-            self.music = loaded;
-            if self.covered && !self.hovered {
-                self.set_bar_mode(true);
-                self.set_expanded(false); // music set first, so this doesn't loop back here
-            }
-        }
-        if self.music_mix.target != mix {
-            self.music_mix.set_target(mix, spring::ROW);
-            self.start_animation();
-        }
-        // ~30 fps while music plays: the waveform is visible closed and on every open page
-        // (the progress bar rides along).
-        let ms = if playing { 33 } else { 0 };
-        if ms != self.tick_ms {
-            self.tick_ms = ms;
-            if ms == 0 {
-                let _ = KillTimer(Some(self.hwnd), TICK_TIMER);
-            } else {
-                SetTimer(Some(self.hwnd), TICK_TIMER, ms, None);
-            }
-        }
-    }
-
     // ---------------------------------------------------------------- drawing
 
     fn closed_size(&self) -> (f32, f32) {
-        if self.hud.is_some() {
+        if self.hud == Some(Hud::Track) {
+            TRACK_HUD
+        } else if self.hud.is_some() {
             HUD
         } else if self.covered && !self.prefs.always_show && !self.music {
             BAR
@@ -1236,6 +1127,12 @@ impl App {
                 self.prefs.save();
                 return self.redraw();
             }
+            Action::PausedHide(k) => {
+                self.prefs.paused_hide = k;
+                self.prefs.save();
+                self.update_ticker();
+                return self.redraw();
+            }
             Action::OpenMode(k) => {
                 self.prefs.open_mode = k;
                 self.prefs.save();
@@ -1389,6 +1286,7 @@ impl App {
             | Action::Startup
             | Action::AlwaysShow
             | Action::Speed(_)
+            | Action::PausedHide(_)
             | Action::OpenMode(_)
             | Action::DelayBox => {}
             Action::Seek { x0, x1 } => {
@@ -1730,144 +1628,6 @@ impl App {
         self.track_leave();
     }
 
-    // ------------------------------------------------------------ Wi-Fi password
-
-    unsafe fn open_password(&mut self, ssid: &str) {
-        self.pw_ssid = Some(ssid.to_string());
-        self.pw_text.clear();
-        self.pw_show = false;
-        self.focus_password();
-    }
-
-    /// Give the password field the keyboard. The notch normally never takes focus, so it
-    /// becomes an ordinary active window just while you type.
-    unsafe fn focus_password(&mut self) {
-        if self.pw_ssid.is_none() {
-            return;
-        }
-        self.pw_focus = true;
-        self.take_keyboard();
-        self.redraw();
-    }
-
-    /// The notch normally never takes focus; it becomes an ordinary active window while you
-    /// type in one of its boxes (Wi-Fi password, hover delay), with a blinking caret.
-    unsafe fn take_keyboard(&mut self) {
-        let style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
-        SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style & !(WS_EX_NOACTIVATE.0 as isize));
-        let _ = SetForegroundWindow(self.hwnd);
-        let _ = SetFocus(Some(self.hwnd));
-        self.caret_on = true;
-        SetTimer(Some(self.hwnd), CARET_TIMER, 530, None);
-    }
-
-    /// Typing in a box: stay open, and keys go to it.
-    fn typing(&self) -> bool {
-        self.pw_focus || self.delay_edit.is_some()
-    }
-
-    /// Back to never taking focus. If the pointer is already away, close like a normal leave.
-    unsafe fn release_keyboard(&mut self) {
-        let _ = KillTimer(Some(self.hwnd), CARET_TIMER);
-        let style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
-        SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE.0 as isize);
-        if !self.tracking && !self.pinned && self.hovered {
-            self.leaving = true;
-            SetTimer(Some(self.hwnd), LEAVE_TIMER, LEAVE_MS, None);
-        }
-        self.redraw();
-    }
-
-    /// The field lost the keyboard (clicked elsewhere, Esc, joined).
-    unsafe fn blur_password(&mut self) {
-        if !self.pw_focus {
-            return;
-        }
-        self.pw_focus = false;
-        self.release_keyboard();
-    }
-
-    /// Done typing a hover delay (Enter, clicked elsewhere): keep it if it's a number,
-    /// pulled into 0.15–1.5 s. `keep: false` (Esc) leaves the old value.
-    unsafe fn end_delay_edit(&mut self, keep: bool) {
-        let Some(text) = self.delay_edit.take() else { return };
-        if let Some(ms) = settings::parse_delay(&text).filter(|_| keep) {
-            self.prefs.hover_ms = ms;
-            self.prefs.save();
-        }
-        self.release_keyboard();
-    }
-
-    unsafe fn close_password(&mut self) {
-        self.blur_password();
-        self.pw_ssid = None;
-        self.pw_text.clear(); // don't keep the password around
-    }
-
-    unsafe fn submit_password(&mut self) {
-        let Some(ssid) = self.pw_ssid.clone() else { return };
-        if self.pw_text.chars().count() < 8 || self.wifi_state.joining.is_some() {
-            return;
-        }
-        if let Some(network) = self.wifi_state.networks.iter().find(|n| n.ssid == ssid).cloned() {
-            self.wifi.join(&network, &self.pw_text);
-            self.wifi_state = self.wifi.state();
-        }
-        self.blur_password();
-    }
-
-    /// A key typed into the password field or the hover delay box.
-    unsafe fn on_char(&mut self, ch: u32) {
-        if let Some(text) = &mut self.delay_edit {
-            match ch {
-                0x08 => {
-                    text.pop();
-                }
-                0x0D => return self.end_delay_edit(true),
-                0x1B => return self.end_delay_edit(false),
-                c if (c == u32::from(b'.') || char::from_u32(c).is_some_and(|c| c.is_ascii_digit())) && text.len() < 5 => {
-                    text.push(c as u8 as char);
-                }
-                _ => {}
-            }
-            self.caret_on = true;
-            return self.redraw();
-        }
-        if !self.pw_focus {
-            return;
-        }
-        match ch {
-            0x08 => {
-                self.pw_text.pop();
-            }
-            0x0D => return self.submit_password(),
-            0x1B => {
-                self.close_password();
-                return self.set_expanded(self.hovered);
-            }
-            0x16 => {
-                // Ctrl+V
-                if let Some(text) = shelf::clipboard_text(self.hwnd) {
-                    self.pw_text.extend(text.chars().filter(|c| !c.is_control()));
-                }
-            }
-            c if c >= 0x20 => {
-                if let Some(c) = char::from_u32(c) {
-                    self.pw_text.push(c);
-                }
-            }
-            _ => {}
-        }
-        self.pw_text = self.pw_text.chars().take(63).collect(); // Wi-Fi passwords are at most 63
-        if let Some((ssid, _)) = &self.wifi_state.error {
-            if self.pw_ssid.as_ref() == Some(ssid) {
-                self.wifi_state.error = None; // typing again clears the old error
-            }
-        }
-        self.caret_on = true;
-        self.redraw();
-    }
-
     /// Is a full-screen or maximised app in front, on the notch's monitor? If that changed,
     /// shrink to the thin bar (or grow back).
     /// A full-screen app came to the front (or left): hide the notch and its shadow, and
@@ -1962,7 +1722,8 @@ impl App {
         self.hud = Some(kind);
         self.hud_kind = kind;
         self.hud_mix.set_target(1.0, EXPAND);
-        SetTimer(Some(self.hwnd), HUD_TIMER, HUD_MS, None);
+        let ms = if kind == Hud::Track { TRACK_HUD_MS } else { HUD_MS };
+        SetTimer(Some(self.hwnd), HUD_TIMER, ms, None);
         self.set_expanded(false);
     }
 
@@ -2013,69 +1774,12 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use Status::{Paused, Playing, Stopped};
-
-    #[test]
-    fn track_times_format() {
-        assert_eq!(format_time(0.0), "0:00");
-        assert_eq!(format_time(65.9), "1:05");
-        assert_eq!(format_time(3725.0), "1:02:05");
-        assert_eq!(format_time(-3.0), "0:00");
-        assert_eq!(format_time(f64::NAN), "0:00");
-    }
 
     #[test]
     fn hit_test_rect_excludes_far_edges() {
         let r = rect(10.0, 10.0, 20.0, 20.0);
         assert!(contains(&r, 10.0, 10.0) && contains(&r, 19.9, 19.9));
         assert!(!contains(&r, 20.0, 15.0) && !contains(&r, 15.0, 20.0) && !contains(&r, 9.9, 15.0));
-    }
-
-    // F2: the media source you picked stays put.
-    #[test]
-    fn source_stays_when_another_app_starts_playing() {
-        let s = [("spotify", Paused), ("chrome", Playing)];
-        assert_eq!(pick_source(Some("spotify"), &s, Some("chrome")).as_deref(), Some("spotify"));
-    }
-
-    #[test]
-    fn source_ignores_windows_current_changing() {
-        let s = [("spotify", Playing), ("chrome", Playing)];
-        assert_eq!(pick_source(Some("spotify"), &s, Some("chrome")).as_deref(), Some("spotify"));
-    }
-
-    #[test]
-    fn second_browser_session_can_stay_selected() {
-        let s = [("chrome", Playing), ("chrome#1", Paused)];
-        assert_eq!(pick_source(Some("chrome#1"), &s, Some("chrome")).as_deref(), Some("chrome#1"));
-    }
-
-    #[test]
-    fn source_gone_falls_back_to_playing_windows_current_first() {
-        let s = [("vlc", Playing), ("chrome", Playing)];
-        assert_eq!(pick_source(Some("spotify"), &s, Some("chrome")).as_deref(), Some("chrome"));
-        assert_eq!(pick_source(Some("spotify"), &s, None).as_deref(), Some("vlc"));
-    }
-
-    #[test]
-    fn stopped_source_counts_as_gone() {
-        let s = [("spotify", Stopped), ("chrome", Paused)];
-        assert_eq!(pick_source(Some("spotify"), &s, None).as_deref(), Some("chrome"));
-    }
-
-    #[test]
-    fn nothing_selected_prefers_playing_then_paused() {
-        let s = [("spotify", Paused), ("chrome", Paused), ("vlc", Playing)];
-        assert_eq!(pick_source(None, &s, Some("chrome")).as_deref(), Some("vlc"));
-        let s = [("spotify", Paused), ("chrome", Paused)];
-        assert_eq!(pick_source(None, &s, Some("chrome")).as_deref(), Some("chrome"));
-        assert_eq!(pick_source(None, &s, None).as_deref(), Some("spotify"));
-    }
-
-    #[test]
-    fn all_stopped_shows_nothing() {
-        assert_eq!(pick_source(Some("spotify"), &[("spotify", Stopped)], Some("spotify")), None);
-        assert_eq!(pick_source(None, &[], None), None);
     }
 
     /// Frames (at 60 Hz) a spring takes to settle at an animation speed.

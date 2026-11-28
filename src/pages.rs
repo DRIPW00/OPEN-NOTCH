@@ -276,16 +276,17 @@ impl App {
             self.brush.SetOpacity(a * alpha);
         };
 
-        // ---- Tabs: the shown app, plus other apps that are playing (greyed out).
+        // ---- Tabs: the shown app, plus other apps that are playing (greyed out). Those that
+        // don't fit are summed up in a "+N" pill that opens the first of them.
+        let tabs = self.tabs();
+        let font_of = |active: bool| if active { &self.gfx.fonts.tab_active } else { &self.gfx.fonts.tab };
+        let widths: Vec<f32> = tabs.iter().enumerate().map(|(i, tab)| 32.0 + self.gfx.measure(&tab.app_name, font_of(i == 0)) / s + 6.0).collect();
+        let shown = fit_tabs(&widths, w_box + 6.0, MORE_TABS_W);
         let mut tab_x = 0.0;
-        for (i, tab) in self.tabs().into_iter().enumerate() {
+        for (i, tab) in tabs.iter().take(shown).enumerate() {
             let active = i == 0;
-            let font = if active { &self.gfx.fonts.tab_active } else { &self.gfx.fonts.tab };
-            let text_w = self.gfx.measure(&tab.app_name, font) / s;
-            let tab_w = 10.0 + 6.0 + 6.0 + text_w + 10.0;
-            if tab_x + tab_w > w_box {
-                break; // no room for more tabs
-            }
+            let font = font_of(active);
+            let tab_w = widths[i] - 6.0;
             let r = rect(at(tab_x), y(14.0), at(tab_x + tab_w), y(40.0));
             let action = Action::Tab(tab.id.clone());
             let bg = if active { 0xFFFFFF } else if hovered(&action) { 0x2A2A2E } else { 0x1C1C1F };
@@ -302,6 +303,18 @@ impl App {
                 hits.push((r, action));
             }
             tab_x += tab_w + 6.0;
+        }
+        if let Some(first_hidden) = tabs.get(shown) {
+            let r = rect(at(tab_x), y(14.0), at(tab_x + MORE_TABS_W - 6.0), y(40.0));
+            let action = Action::Tab(first_hidden.id.clone());
+            set(if hovered(&action) { 0x2A2A2E } else { 0x1C1C1F }, 1.0);
+            t.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r, radiusX: y(13.0), radiusY: y(13.0) }, brush);
+            set(0xA1A1AA, 1.0);
+            let more = format!("+{}", tabs.len() - shown);
+            let text_w = self.gfx.measure(&more, &self.gfx.fonts.tab) / s;
+            let left = tab_x + (MORE_TABS_W - 6.0 - text_w) / 2.0;
+            self.gfx.text(t, &more, &self.gfx.fonts.tab, rect(at(left), y(14.0), at(tab_x + MORE_TABS_W), y(40.0)), brush);
+            hits.push((r, action));
         }
 
         // ---- Art, title, artist
@@ -322,30 +335,30 @@ impl App {
             }
         }
 
-        // ---- Seek bar with times
-        let position = session.position_now();
-        let progress = if session.duration > 0.0 { (position / session.duration).clamp(0.0, 1.0) as f32 } else { 0.0 };
-        let (bar_x0, bar_x1, bar_y) = (128.0, w_box - 48.0, 112.0);
+        // ---- Seek bar with elapsed time and time left. Live streams have no length: no bar.
         if session.duration > 0.0 {
+            let position = session.position_now();
+            let progress = (position / session.duration).clamp(0.0, 1.0) as f32;
+            let (bar_x0, bar_x1, bar_y) = (128.0, w_box - 48.0, 112.0);
             set(0xA1A1AA, 1.0);
             self.gfx.text(t, &format_time(position), &self.gfx.fonts.time, rect(at(84.0), y(104.0), at(124.0), y(120.0)), brush);
-            self.gfx.text(t, &format_time(session.duration), &self.gfx.fonts.time_right, rect(at(w_box - 44.0), y(104.0), at(w_box), y(120.0)), brush);
-        }
-        set(0x3F3F46, 1.0);
-        let track = rect(at(bar_x0), y(bar_y - 2.0), at(bar_x1), y(bar_y + 2.0));
-        t.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: track, radiusX: y(2.0), radiusY: y(2.0) }, brush);
-        let fill_x = bar_x0 + (bar_x1 - bar_x0) * progress;
-        set(0xFFFFFF, 1.0);
-        if progress > 0.0 {
-            let fill = rect(at(bar_x0), y(bar_y - 2.0), at(fill_x), y(bar_y + 2.0));
-            t.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: fill, radiusX: y(2.0), radiusY: y(2.0) }, brush);
-        }
-        // Knob, as in the design. Draggable only if the app allows seeking.
-        let seek = Action::Seek { x0: at(bar_x0), x1: at(bar_x1) };
-        let knob = if session.can_seek && hovered(&seek) { 6.0 } else { 5.0 };
-        t.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: at(fill_x), Y: y(bar_y) }, radiusX: y(knob), radiusY: y(knob) }, brush);
-        if session.can_seek {
-            hits.push((rect(at(bar_x0 - 6.0), y(bar_y - 9.0), at(bar_x1 + 6.0), y(bar_y + 9.0)), seek));
+            self.gfx.text(t, &time_left(position, session.duration), &self.gfx.fonts.time_right, rect(at(w_box - 44.0), y(104.0), at(w_box), y(120.0)), brush);
+            set(0x3F3F46, 1.0);
+            let track = rect(at(bar_x0), y(bar_y - 2.0), at(bar_x1), y(bar_y + 2.0));
+            t.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: track, radiusX: y(2.0), radiusY: y(2.0) }, brush);
+            let fill_x = bar_x0 + (bar_x1 - bar_x0) * progress;
+            set(0xFFFFFF, 1.0);
+            if progress > 0.0 {
+                let fill = rect(at(bar_x0), y(bar_y - 2.0), at(fill_x), y(bar_y + 2.0));
+                t.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: fill, radiusX: y(2.0), radiusY: y(2.0) }, brush);
+            }
+            // Knob, as in the design. Draggable only if the app allows seeking.
+            let seek = Action::Seek { x0: at(bar_x0), x1: at(bar_x1) };
+            let knob = if session.can_seek && hovered(&seek) { 6.0 } else { 5.0 };
+            t.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: at(fill_x), Y: y(bar_y) }, radiusX: y(knob), radiusY: y(knob) }, brush);
+            if session.can_seek {
+                hits.push((rect(at(bar_x0 - 6.0), y(bar_y - 9.0), at(bar_x1 + 6.0), y(bar_y + 9.0)), seek));
+            }
         }
 
         // ---- Controls: shuffle, previous, play/pause, next, repeat
@@ -831,9 +844,46 @@ impl App {
     }
 }
 
+/// Width of the "+N" pill for source tabs that don't fit, gap included (design pixels).
+const MORE_TABS_W: f32 = 36.0;
+
+/// How many source tabs fit in `avail` (each width includes its gap), keeping room for the
+/// "+N" pill while some are left over. The shown tab (the first) always stays.
+fn fit_tabs(widths: &[f32], avail: f32, more_w: f32) -> usize {
+    let mut x = 0.0;
+    for (i, w) in widths.iter().enumerate() {
+        let need = if i + 1 < widths.len() { w + more_w } else { *w };
+        if i > 0 && x + need > avail {
+            return i;
+        }
+        x += w;
+    }
+    widths.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // R1.04: source tabs that don't fit leave room for a "+N" pill instead of vanishing.
+    #[test]
+    fn tabs_that_dont_fit_leave_room_for_more() {
+        // Widths include the gap after each tab; the "+N" pill needs 30.
+        assert_eq!(fit_tabs(&[60.0, 60.0], 200.0, 30.0), 2, "all fit: no pill needed");
+        assert_eq!(fit_tabs(&[60.0, 60.0, 60.0, 60.0], 200.0, 30.0), 2, "3rd would leave no room for +2");
+        assert_eq!(fit_tabs(&[60.0, 60.0, 60.0], 180.0, 30.0), 3, "the last one fits exactly: no pill");
+        assert_eq!(fit_tabs(&[250.0, 60.0], 200.0, 30.0), 1, "the shown tab always stays");
+        assert_eq!(fit_tabs(&[], 200.0, 30.0), 0);
+    }
+
+    // R1.04: time left, like the music apps.
+    #[test]
+    fn time_left_counts_down() {
+        assert_eq!(time_left(30.0, 180.0), "-2:30");
+        assert_eq!(time_left(180.0, 180.0), "-0:00");
+        assert_eq!(time_left(200.0, 180.0), "-0:00", "past the end: never negative");
+        assert_eq!(time_left(0.0, 3_725.0), "-1:02:05");
+    }
 
     // One-way page loop: pages sit on a ring.
     #[test]

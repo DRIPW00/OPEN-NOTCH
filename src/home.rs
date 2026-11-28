@@ -119,7 +119,47 @@ impl App {
         let wave_right = right - 14.0 * s;
         self.draw_waveform(t, brush, wave_right, h / 2.0, 2.5 * s, 2.0 * s, 16.0 * s, alpha);
         let wave_w = WAVE_BARS as f32 * 4.5 * s;
-        self.draw_privacy_dots(t, brush, wave_right - wave_w - 8.0 * s, h / 2.0, alpha);
+        let dots_right = wave_right - wave_w - 8.0 * s;
+        self.draw_privacy_dots(t, brush, dots_right, h / 2.0, alpha);
+        // The song between the art and the waveform: title, then the artist if there's room.
+        let dots_w = self.privacy_colours().len() as f32 * 11.0 * s;
+        let (text_left, text_right) = (left + 42.0 * s, dots_right - dots_w - 6.0 * s);
+        if text_right - text_left < 20.0 * s {
+            return; // the notch is mid-animation and too narrow for text
+        }
+        let fonts = &self.gfx.fonts;
+        self.brush.SetColor(&rgb(0xFFFFFF, 1.0));
+        self.brush.SetOpacity(alpha);
+        self.gfx.text(t, &session.title, &fonts.closed_song, rect(text_left, 0.0, text_right, h), brush);
+        let artist_left = text_left + self.gfx.measure(&session.title, &fonts.closed_song) + 6.0 * s;
+        if !session.artist.is_empty() && text_right - artist_left > 30.0 * s {
+            self.brush.SetColor(&rgb(0x8E8E93, 1.0));
+            self.gfx.text(t, &session.artist, &fonts.closed_song, rect(artist_left, 0.0, text_right, h), brush);
+        }
+    }
+
+    /// The new-song pop-up: [art] title / artist … time left, waveform.
+    pub(crate) unsafe fn draw_track_hud(&self, t: &ID2D1RenderTarget, brush: &ID2D1Brush, alpha: f32) {
+        let Some(session) = self.current() else { return };
+        let s = self.dpi_scale;
+        let w = self.width.value * s;
+        let h = self.height.value * s;
+        let cx = self.px_w as f32 / 2.0;
+        let (left, right) = (cx - w / 2.0, cx + w / 2.0);
+        let size = (h - 16.0 * s).max(0.0);
+        self.draw_art(t, brush, session, left + 10.0 * s, 8.0 * s, size, 8.0 * s, alpha, true);
+        let text_left = left + 10.0 * s + size + 10.0 * s;
+        let text_right = right - 62.0 * s;
+        let fonts = &self.gfx.fonts;
+        self.brush.SetOpacity(alpha);
+        self.brush.SetColor(&rgb(0xFFFFFF, 1.0));
+        self.gfx.text(t, &session.title, &fonts.title, rect(text_left, 8.0 * s, text_right, h / 2.0 + 2.0 * s), brush);
+        self.brush.SetColor(&rgb(0xA1A1AA, 1.0));
+        self.gfx.text(t, &session.artist, &fonts.artist, rect(text_left, h / 2.0, text_right, h - 8.0 * s), brush);
+        if session.duration > 0.0 {
+            self.gfx.text(t, &time_left(session.position_now(), session.duration), &fonts.time_right, rect(right - 60.0 * s, 8.0 * s, right - 14.0 * s, h / 2.0), brush);
+        }
+        self.draw_waveform(t, brush, right - 14.0 * s, h * 0.7, 2.5 * s, 2.0 * s, 14.0 * s, alpha);
     }
 
     /// Closed, nothing loaded: [time] [day] [shelf files] … [dots][battery].
@@ -283,7 +323,11 @@ impl App {
             self.draw_idle_closed(t, brush, alpha * (1.0 - mix));
         }
         if mix > 0.001 {
-            self.draw_hud(t, brush, alpha * mix);
+            if self.hud_kind == Hud::Track {
+                self.draw_track_hud(t, brush, alpha * mix);
+            } else {
+                self.draw_hud(t, brush, alpha * mix);
+            }
         }
     }
 
@@ -292,6 +336,7 @@ impl App {
         match hud {
             Hud::Volume => self.sound.volume,
             Hud::Brightness => self.bright.unwrap_or(0) as f32 / 100.0,
+            Hud::Track => 0.0,
         }
     }
 
@@ -340,7 +385,7 @@ impl App {
         let (fill, icon) = match kind {
             Hud::Volume if self.sound.muted => (0x8E8E93, Icon::Mute),
             Hud::Volume => (0xFFFFFF, Icon::Speaker),
-            Hud::Brightness => (BRIGHT_YELLOW, Icon::Sun),
+            Hud::Brightness | Hud::Track => (BRIGHT_YELLOW, Icon::Sun),
         };
         let pill_h = 22.0 * s;
         let pill = rect(left + 10.0 * s, (h - pill_h) / 2.0, right - 50.0 * s, (h + pill_h) / 2.0);

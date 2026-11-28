@@ -112,6 +112,11 @@ pub(crate) fn run() -> Result<()> {
         if GetLastError() == ERROR_ALREADY_EXISTS {
             return Ok(());
         }
+        // Up to R1.03 the app was "Dynamic Island", with another lock name. Close a copy of
+        // it that's still running (e.g. started with Windows), or the two notches stack.
+        if let Ok(old) = FindWindowW(w!("DynamicIslandWindow"), PCWSTR::null()) {
+            let _ = PostMessageW(Some(old), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
 
         // "Launch at startup" keeps working if this folder was moved.
         startup::refresh_path();
@@ -649,6 +654,14 @@ pub(crate) extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpa
                 LRESULT(0)
             }
 
+            WM_TIMER if wparam.0 == PAUSED_TIMER => {
+                let _ = KillTimer(Some(hwnd), PAUSED_TIMER);
+                with_app(|app| {
+                    app.update_ticker();
+                    app.redraw();
+                });
+                LRESULT(0)
+            }
             WM_TIMER if wparam.0 == HUD_TIMER => {
                 with_app(|app| app.hide_hud());
                 LRESULT(0)

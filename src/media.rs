@@ -110,8 +110,8 @@ pub enum Command {
 
 enum Msg {
     Changed,
-    /// A session's song details changed (title, artist or cover): decode its art again.
-    PropsChanged,
+    /// A session's song details changed (title, artist or cover): decode that app's art again.
+    PropsChanged(String),
     Command(Command),
 }
 
@@ -176,6 +176,19 @@ struct Cached {
     art: Arc<Art>,
     size: u64,
     at: Instant,
+    /// Play state when the watch (re)started: see `rewatch`.
+    status: Status,
+    /// The app it belongs to (its AppUserModelID).
+    app: String,
+}
+
+/// A play/pause change starts the cover watch again: Apple Music can open with a song loaded
+/// and a placeholder cover, and only fetch the real one when play is pressed.
+fn rewatch(c: &mut Cached, status: Status) {
+    if c.status != status {
+        c.status = status;
+        c.at = Instant::now();
+    }
 }
 
 /// How long after loading a cover it is still checked for a silent swap (see `cover_swapped`).
@@ -251,7 +264,7 @@ impl Reader {
             Msg::Changed => {}
             // Apple Music sends a song's title first and its cover a moment later, in a second
             // signal; reusing the cached art would keep a missing or stale cover all song long.
-            Msg::PropsChanged => self.art_cache.clear(),
+            Msg::PropsChanged(app) => self.art_cache.retain(|_, c| c.app != app),
             Msg::Command(cmd) => self.run(cmd),
         }
         true
@@ -279,13 +292,18 @@ impl Reader {
             let _ = old.session.RemoveTimelinePropertiesChanged(old.tokens[2]);
         }
         for session in sessions {
-            let make = |msg: fn() -> Msg| {
+            let app = session.SourceAppUserModelId().map(|id| id.to_string()).unwrap_or_default();
+            let changed = || {
                 let tx = self.tx.clone();
                 move || {
-                    let _ = tx.send(msg());
+                    let _ = tx.send(Msg::Changed);
                 }
             };
-            let (a, b, c) = (make(|| Msg::PropsChanged), make(|| Msg::Changed), make(|| Msg::Changed));
+            let tx = self.tx.clone();
+            let a = move || {
+                let _ = tx.send(Msg::PropsChanged(app.clone()));
+            };
+            let (b, c) = (changed(), changed());
             let tokens = [
                 session.MediaPropertiesChanged(&TypedEventHandler::new(move |_, _| {
                     a();
@@ -422,6 +440,9 @@ impl Reader {
 
         // Album art: cached per song, but re-checked while young (see cover_swapped).
         let key = hash(&[&id, &title, &artist, &album]);
+        if let Some(c) = self.art_cache.get_mut(&key) {
+            rewatch(c, status);
+        }
         let cached = self.art_cache.get(&key).map(|c| (c.art.clone(), c.size, c.at));
         let art = match cached {
             Some((art, _, at)) if at.elapsed() >= COVER_WATCH => Some(art),
@@ -435,7 +456,7 @@ impl Reader {
                         match fresh {
                             Some((art, size)) => {
                                 let at = cached.map(|(_, _, at)| at).unwrap_or_else(Instant::now);
-                                self.art_cache.insert(key, Cached { art: art.clone(), size, at });
+                                self.art_cache.insert(key, Cached { art: art.clone(), size, at, status, app: id.clone() });
                                 Some(art)
                             }
                             None => cached.map(|(art, _, _)| art), // keep what we had
@@ -628,7 +649,7 @@ fn hash(parts: &[&str]) -> u64 {
 /// sure it's bright enough to read on black.
 fn accent_colour(pixels: &[u8]) -> [f32; 3] {
     let (mut r, mut g, mut b, mut weight) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-    for px in pixels.chunks_exact(4) {
+    for px in pixels.as_chunks::<4>().0 {
         let (pb, pg, pr) = (px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0);
         let max = pr.max(pg).max(pb);
         let min = pr.min(pg).min(pb);
@@ -668,11 +689,14 @@ mod tests {
             let (tx, _rx) = channel();
             let Ok(mut r) = Reader::new(tx) else { return }; // no media controls on this PC
             let art = || Arc::new(Art { key: 7, big: vec![], big_size: 0, small: vec![], small_size: 0, accent: [0.0; 3] });
-            r.art_cache.insert(7, Cached { art: art(), size: 1, at: Instant::now() });
+            let cached = |app: &str| Cached { art: art(), size: 1, at: Instant::now(), status: Status::Playing, app: app.into() };
+            r.art_cache.insert(7, cached("Music"));
+            r.art_cache.insert(8, cached("Chrome"));
             assert!(r.handle(Msg::Changed), "progress or play/pause still refreshes");
             assert!(r.art_cache.contains_key(&7), "...but keeps the decoded art");
-            assert!(r.handle(Msg::PropsChanged));
-            assert!(r.art_cache.is_empty(), "new song details: decode the cover again");
+            assert!(r.handle(Msg::PropsChanged("Music".into())));
+            assert!(!r.art_cache.contains_key(&7), "new song details: decode the cover again");
+            assert!(r.art_cache.contains_key(&8), "...only for that app, not every app playing");
         }
     }
 
@@ -687,6 +711,22 @@ mod tests {
         assert!(!cover_swapped(658_552, Some(658_552), young), "same cover: keep it");
         assert!(!cover_swapped(1_200, None, young), "couldn't read the size: keep what we have");
         assert!(!cover_swapped(1_200, Some(658_552), Duration::from_secs(31)), "older than 30 s: stop checking");
+    }
+
+    // Art bug, part 3: Apple Music can open with a song loaded (paused) and a placeholder cover,
+    // and only fetch the real one when play is pressed, which may be long after 30 s. Every
+    // play/pause change starts the watch again.
+    #[test]
+    fn play_or_pause_restarts_the_cover_watch() {
+        use super::*;
+        let art = Arc::new(Art { key: 7, big: vec![], big_size: 0, small: vec![], small_size: 0, accent: [0.0; 3] });
+        let old = Instant::now() - Duration::from_secs(120);
+        let mut c = Cached { art, size: 3_399, at: old, status: Status::Paused, app: String::new() };
+        rewatch(&mut c, Status::Paused);
+        assert_eq!(c.at, old, "still paused: the watch stays over");
+        rewatch(&mut c, Status::Playing);
+        assert!(c.at.elapsed() < COVER_WATCH, "pressed play: watch the cover again");
+        assert_eq!(c.status, Status::Playing);
     }
 
     // Bug hunt B3: a plain .exe keeps the underscores in its name.

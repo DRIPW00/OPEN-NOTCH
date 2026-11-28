@@ -1,5 +1,25 @@
 # Changelog
 
+## R1.04
+
+### New
+- **New-song pop-up.** When a new song starts playing, the closed notch grows for 3 seconds with the album art, title, artist and time left, then shrinks back. It also shows over the thin bar on maximised windows.
+- **Song title on the closed notch.** While music plays, the closed notch shows the title (and the artist when there's room) between the album art and the waveform.
+- **Settings > General > Paused music.** Choose how long paused music stays on the closed notch: Never, 10 s, 30 s (default), 1 min or 5 min. After that the clock comes back, and the thin bar can return over maximised windows. The Music page stays, so you can still resume.
+- **Time left.** The Music page shows how much of the song is left (-2:30) instead of its total length.
+
+### Fixed
+- Album art could stay a placeholder when Apple Music opened with a song loaded and you only pressed play more than 30 seconds later. The cover is now checked again every time playback starts or pauses.
+- Live streams no longer show an empty seek bar.
+- When several apps play at once and their tabs don't fit, a "+N" pill now shows the rest instead of hiding them.
+- A song change in one app no longer makes every other app's album art load again.
+- Updating from the old Dynamic Island while it was still running (for example, started with Windows) left two notches on screen, one on top of the other. OpenNotch now closes the old copy when it starts.
+
+### Under the hood
+- main.rs split again: now-playing code moved to music.rs, typing (Wi-Fi password, hover delay) to typing.rs; no change in behaviour.
+- Code checker (clippy) is clean.
+- 78 automatic tests.
+
 ## R1.03: renamed to OpenNotch
 
 ### Changed

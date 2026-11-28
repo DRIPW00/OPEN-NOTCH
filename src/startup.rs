@@ -74,7 +74,7 @@ fn approved(data: &[u8]) -> bool {
 
 /// UTF-16LE registry string bytes -> String (without the trailing NUL).
 fn text(data: &[u8]) -> String {
-    let wide: Vec<u16> = data.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let wide: Vec<u16> = data.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
     String::from_utf16_lossy(&wide).trim_end_matches('\0').to_string()
 }
 

@@ -123,6 +123,8 @@ const ICONS: [(Icon, bool, &str); 28] = [
 pub struct Fonts {
     pub title: IDWriteTextFormat,
     pub artist: IDWriteTextFormat,
+    /// The song on the closed notch while music plays.
+    pub closed_song: IDWriteTextFormat,
     pub tab: IDWriteTextFormat,
     pub tab_active: IDWriteTextFormat,
     pub time: IDWriteTextFormat,
@@ -356,6 +358,7 @@ unsafe fn make_fonts(dwrite: &IDWriteFactory, family: &HSTRING, s: f32) -> Resul
     Ok(Fonts {
         title: make(15.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, leading)?,
         artist: make(13.0, DWRITE_FONT_WEIGHT_NORMAL, leading)?,
+        closed_song: make(13.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, leading)?,
         tab: make(11.0, DWRITE_FONT_WEIGHT_MEDIUM, leading)?,
         tab_active: make(11.0, DWRITE_FONT_WEIGHT_SEMI_BOLD, leading)?,
         time: make(11.0, DWRITE_FONT_WEIGHT_NORMAL, leading)?,

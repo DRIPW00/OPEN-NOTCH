@@ -60,7 +60,7 @@ fn entry(res: &mut Vec<u8>, kind: u16, id: u16, flags: u16, data: &[u8]) {
     header.extend_from_slice(&[0; 8]); // Version, Characteristics
     res.extend_from_slice(&header);
     res.extend_from_slice(data);
-    while res.len() % 4 != 0 {
+    while !res.len().is_multiple_of(4) {
         res.push(0);
     }
 }

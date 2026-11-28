@@ -22,7 +22,13 @@ pub struct Prefs {
     pub hover_ms: u32,
     /// What opens the notch: index into OPEN_MODES.
     pub open_mode: usize,
+    /// How long paused music stays on the closed notch: index into PAUSED_HIDE.
+    pub paused_hide: usize,
 }
+
+/// Paused music goes back to the clock after: (label, seconds; None = never).
+pub const PAUSED_HIDE: [(&str, Option<u32>); 5] = [("Never", None), ("10 s", Some(10)), ("30 s", Some(30)), ("1 min", Some(60)), ("5 min", Some(300))];
+const PAUSED_HIDE_DEFAULT: usize = 2;
 
 /// Animation speed choices: (label, how much faster than normal time runs).
 pub const SPEEDS: [(&str, f32); 7] = [
@@ -66,7 +72,7 @@ fn choice(v: &str, count: usize, default: usize) -> usize {
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { order: ALL.to_vec(), hidden: Vec::new(), last: Page::Home, always_show: false, speed: 1, hover_ms: 300, open_mode: OPEN_HOVER }
+        Prefs { order: ALL.to_vec(), hidden: Vec::new(), last: Page::Home, always_show: false, speed: 1, hover_ms: 300, open_mode: OPEN_HOVER, paused_hide: PAUSED_HIDE_DEFAULT }
     }
 }
 
@@ -134,6 +140,7 @@ impl Prefs {
                     }
                 }
                 "open" => prefs.open_mode = choice(v, OPEN_MODES.len(), OPEN_HOVER),
+                "paused_hide" => prefs.paused_hide = choice(v, PAUSED_HIDE.len(), PAUSED_HIDE_DEFAULT),
                 _ => {}
             }
         }
@@ -159,14 +166,15 @@ impl Prefs {
     fn text(&self) -> String {
         let list = |pages: &[Page]| pages.iter().map(|p| key(*p)).collect::<Vec<_>>().join(",");
         format!(
-            "order={}\nhidden={}\nlast={}\nalways_show={}\nspeed={}\nhover_ms={}\nopen={}\n",
+            "order={}\nhidden={}\nlast={}\nalways_show={}\nspeed={}\nhover_ms={}\nopen={}\npaused_hide={}\n",
             list(&self.order),
             list(&self.hidden),
             key(self.last),
             self.always_show as u8,
             self.speed,
             self.hover_ms,
-            self.open_mode
+            self.open_mode,
+            self.paused_hide
         )
     }
 
@@ -200,6 +208,15 @@ impl Prefs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // R1.04: Settings > Paused music, default 30 s, survives a restart.
+    #[test]
+    fn paused_music_setting() {
+        assert_eq!(PAUSED_HIDE[Prefs::default().paused_hide].1, Some(30));
+        let p = Prefs { paused_hide: 0, ..Prefs::default() };
+        assert_eq!(Prefs::parse(&p.text()).paused_hide, 0, "Never is kept");
+        assert_eq!(Prefs::parse("paused_hide=99\n").paused_hide, Prefs::default().paused_hide, "nonsense: default");
+    }
 
     // Rename: settings saved under the old name are carried over once, then left alone.
     #[test]

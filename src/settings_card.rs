@@ -5,7 +5,7 @@ use super::*;
 impl App {
     pub(crate) fn settings_height(&self) -> f32 {
         match self.settings_tab {
-            TAB_GENERAL => SETTINGS_CONTENT + self.general_rows().len() as f32 * SETTINGS_ROW + 8.0,
+            TAB_GENERAL => SETTINGS_CONTENT + (self.general_rows().len() + 1) as f32 * SETTINGS_ROW + 8.0,
             TAB_MOTION => SETTINGS_CONTENT + 3.0 * SETTINGS_ROW + 8.0,
             TAB_PAGES => SETTINGS_TOP + (self.prefs.order.len() + 1) as f32 * SETTINGS_ROW + 8.0,
             _ => SETTINGS_CONTENT + 64.0,
@@ -87,6 +87,25 @@ impl App {
                     self.draw_setting_row(t, brush, top, label, note, hovered(&action), alpha, ox, w_box);
                     self.draw_switch(t, brush, w_box - 48.0, top + (SETTINGS_ROW - 4.0) / 2.0, on, alpha, ox);
                     hits.push((rect(at(0.0), y(top), at(w_box), y(top + SETTINGS_ROW - 4.0)), action));
+                }
+                // Paused music: Never / 10 s / 30 s / 1 min / 5 min pills.
+                let top = SETTINGS_CONTENT + self.general_rows().len() as f32 * SETTINGS_ROW;
+                self.draw_setting_row(t, brush, top, "Paused music", "Back to the clock after", false, alpha, ox, w_box);
+                let pill_w = 56.0;
+                let x0 = w_box - 6.0 - pill_w * settings::PAUSED_HIDE.len() as f32;
+                for (k, (option, _)) in settings::PAUSED_HIDE.iter().enumerate() {
+                    let r = rect(at(x0 + k as f32 * pill_w + 2.0), y(top + 5.0), at(x0 + (k + 1) as f32 * pill_w - 2.0), y(top + SETTINGS_ROW - 9.0));
+                    let action = Action::PausedHide(k);
+                    let chosen = k == self.prefs.paused_hide;
+                    if chosen || hovered(&action) {
+                        set(if chosen { 0x48484A } else { 0x2C2C2E }, 1.0);
+                        t.FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r, radiusX: y(9.0), radiusY: y(9.0) }, brush);
+                    }
+                    set(0xFFFFFF, if chosen { 1.0 } else { 0.55 });
+                    self.gfx.text(t, option, &self.gfx.fonts.ring_value, r, brush);
+                    if !chosen {
+                        hits.push((r, action));
+                    }
                 }
                 return hits;
             }
